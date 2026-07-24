@@ -2,7 +2,7 @@
 //!
 //! A run is a [`Task`] that produces a [`Trajectory`]: an ordered list of
 //! [`Step`]s, each a (thought → action → observation) triple. Everything here
-//! is `serde`-serializable so the ledger can persist and replay it byte-for-byte.
+//! is `serde`-serializable so the ledger can persist and replay it.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

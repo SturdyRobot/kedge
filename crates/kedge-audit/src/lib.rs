@@ -226,7 +226,7 @@ impl AuditReport {
             self.subagent_failures
         ));
         s.push_str(&format!(
-            "  replay                       : all {} run(s) are byte-for-byte replayable from the journal\n\n",
+            "  replay                       : all {} run(s) are replayable from the journal\n\n",
             self.runs
         ));
 

@@ -5,7 +5,7 @@
 //! 1. **Audit** — as the engine executes, each step is written synchronously via
 //!    the [`StepObserver`] hook, so a crashed run still leaves a complete trail.
 //! 2. **Deterministic replay** — a finished run can be reconstructed
-//!    byte-for-byte from the journal ([`Ledger::replay`]), which is the basis for
+//!    from the journal ([`Ledger::replay`]), which is the basis for
 //!    debugging, regression fixtures, and cache-backed re-execution.
 //!
 //! The connection lives behind an `Arc<Mutex<_>>` so a single ledger can be both
