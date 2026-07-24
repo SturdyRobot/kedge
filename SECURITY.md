@@ -53,8 +53,10 @@ is to keep a model's chosen actions inside bounds the operator set.
 - It is **not a sandbox.** In `live` mode the agent's `shell` tool executes
   arbitrary programs with the privileges of the process that launched it (though
   their environment is scrubbed of secrets by default). If you need containment,
-  run Kedge inside one (container, VM, or the `kedge-probe` eBPF supervisor on
-  Linux) — the guards are policy, not isolation.
+  run Kedge inside a **container or VM** — the guards are policy, not isolation.
+  (`kedge-probe` is an **experimental, observe-only eBPF prototype**: it does not
+  enforce, is not wired into a normal run, and must not be relied on for
+  containment. See `crates/kedge-probe`.)
 - Tool classification is **name-based**, augmented by declared capabilities. It
   scans every token and fails safe, and it honors an MCP tool's `readOnlyHint` /
   `destructiveHint` annotations — but only ever to make a tool *more* restricted,

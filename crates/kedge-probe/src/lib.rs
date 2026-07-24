@@ -1,19 +1,28 @@
-//! # kedge-probe
+//! # kedge-probe (experimental, observe-only)
 //!
-//! Kernel-boundary process supervision for Kedge. An AI agent that gets
-//! prompt-injected can try to spawn subshells, phone home, or scribble on system
-//! files — and user-space logging can be bypassed. This crate enforces hard
-//! boundaries *below* user space, at the syscall/LSM layer.
+//! An **experimental prototype** of kernel-boundary process supervision for Kedge.
+//! The intent is that an AI agent which gets prompt-injected — trying to spawn
+//! subshells, phone home, or scribble on system files — could be watched at the
+//! syscall/LSM layer, below the user-space guards it might bypass.
 //!
-//! ## Portability
+//! ## Status — do NOT rely on this for containment
 //!
-//! The **policy model** and the **event/ledger plumbing** here are pure, portable
-//! Rust — they build and are tested on every platform. The actual enforcement is
-//! Linux eBPF **LSM** (not tracepoints — a tracepoint can observe but cannot
-//! return `-EPERM`), lives behind the off-by-default `ebpf` feature, and is
-//! `#[cfg(target_os = "linux")]`. Everywhere else — macOS, Windows, or Linux
-//! without the feature/privileges — [`activate`] returns a [`NullProbe`] that
-//! enforces nothing, so callers can wire supervision in unconditionally.
+//! This is **not** a working sandbox and does **not** enforce anything today:
+//!
+//! - **Observe-only:** the LSM hooks in the `kedge-probe-ebpf` crate currently
+//!   *report and allow* every operation (they return `Ok(0)`, never `-EPERM`).
+//!   The action has already happened by the time it is journaled. LSM is the right
+//!   layer to *eventually* return `-EPERM`, but that path is not implemented.
+//! - **No policy in the kernel:** the allow/deny tables are not loaded into BPF
+//!   maps, so there is nothing for the hooks to enforce against.
+//! - **Not integrated:** no runtime crate depends on or activates this probe, so a
+//!   normal `kedge` run has no kernel supervision at all.
+//! - **Fails open silently:** without the `ebpf` feature/privileges, [`activate`]
+//!   returns a [`NullProbe`] that enforces nothing.
+//!
+//! What *is* real and tested: the portable **policy model** and the **event/ledger
+//! plumbing**. Treat this crate as a research scaffold for future enforcement, not
+//! a security boundary. For actual containment, run Kedge inside a container or VM.
 //!
 //! The kernel programs themselves are the separate, workspace-**excluded**
 //! `kedge-probe-ebpf` crate (it needs a nightly `bpfel-unknown-none` toolchain +
