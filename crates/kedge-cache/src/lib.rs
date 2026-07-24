@@ -32,15 +32,29 @@ pub enum CacheError {
 
 pub type Result<T> = std::result::Result<T, CacheError>;
 
+/// Bump when kedge-compact's compaction algorithm changes in a way that alters
+/// output for unchanged input. It's part of the cache key, so a bump invalidates
+/// every prior entry (they simply become misses) — no stale skeletons after an
+/// upgrade.
+const COMPACT_ALGO_VERSION: &str = "1";
+
+// The key is `(hash, lang, version)`, not `hash` alone: identical *bytes* compacted
+// under a different language (a polyglot file, or the same source fed as Rust then
+// Python) must not return the first language's skeleton, and an algorithm-version
+// bump must not serve a stale one. The table is versioned (`_v2`) so an older
+// content-only cache is discarded rather than mis-read.
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS ast_cache (
-    hash             TEXT PRIMARY KEY,   -- sha256 of the source bytes
+DROP TABLE IF EXISTS ast_cache;
+CREATE TABLE IF NOT EXISTS ast_cache_v2 (
+    hash             TEXT NOT NULL,      -- sha256 of the source bytes
     lang             TEXT NOT NULL,
+    version          TEXT NOT NULL,      -- COMPACT_ALGO_VERSION
     text             TEXT NOT NULL,      -- the compacted skeleton
     original_tokens  INTEGER NOT NULL,
     compacted_tokens INTEGER NOT NULL,
     elided_bodies    INTEGER NOT NULL,
-    created_ms       INTEGER NOT NULL
+    created_ms       INTEGER NOT NULL,
+    PRIMARY KEY (hash, lang, version)
 );
 "#;
 
@@ -89,13 +103,14 @@ impl AstCache {
     /// invoking the Tree-sitter parser on a miss.
     pub fn outline_cached(&self, compactor: &mut Compactor, source: &str) -> Result<CompactResult> {
         let hash = content_hash(source);
-        if let Some(hit) = self.load(&hash)? {
+        let lang = compactor.language().name();
+        if let Some(hit) = self.load(&hash, lang)? {
             self.hits.fetch_add(1, Ordering::SeqCst);
             return Ok(hit);
         }
         self.misses.fetch_add(1, Ordering::SeqCst);
         let result = compactor.outline(source)?;
-        self.store(&hash, compactor.language().name(), &result)?;
+        self.store(&hash, lang, &result)?;
         Ok(result)
     }
 
@@ -109,13 +124,13 @@ impl AstCache {
         self.misses.load(Ordering::SeqCst)
     }
 
-    fn load(&self, hash: &str) -> Result<Option<CompactResult>> {
+    fn load(&self, hash: &str, lang: &str) -> Result<Option<CompactResult>> {
         let conn = self.conn.lock().map_err(|_| CacheError::Poisoned)?;
         let row = conn
             .query_row(
                 "SELECT text, original_tokens, compacted_tokens, elided_bodies
-                 FROM ast_cache WHERE hash = ?1",
-                [hash],
+                 FROM ast_cache_v2 WHERE hash = ?1 AND lang = ?2 AND version = ?3",
+                rusqlite::params![hash, lang, COMPACT_ALGO_VERSION],
                 |r| {
                     Ok(CompactResult {
                         text: r.get(0)?,
@@ -132,12 +147,13 @@ impl AstCache {
     fn store(&self, hash: &str, lang: &str, r: &CompactResult) -> Result<()> {
         let conn = self.conn.lock().map_err(|_| CacheError::Poisoned)?;
         conn.execute(
-            "INSERT OR REPLACE INTO ast_cache
-             (hash, lang, text, original_tokens, compacted_tokens, elided_bodies, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO ast_cache_v2
+             (hash, lang, version, text, original_tokens, compacted_tokens, elided_bodies, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 hash,
                 lang,
+                COMPACT_ALGO_VERSION,
                 r.text,
                 r.original_tokens as i64,
                 r.compacted_tokens as i64,
@@ -190,6 +206,25 @@ mod tests {
         let changed = format!("{SRC}\n// touched");
         cache.outline_cached(&mut c, &changed).unwrap();
         assert_eq!(cache.misses(), 2);
+    }
+
+    #[test]
+    fn same_bytes_different_language_is_not_a_hit() {
+        let cache = AstCache::in_memory().unwrap();
+        let mut rust = Compactor::rust().unwrap();
+        let mut py = Compactor::new(kedge_compact::Language::Python).unwrap();
+        // Store the skeleton under Rust.
+        cache.outline_cached(&mut rust, SRC).unwrap();
+        assert_eq!(cache.misses(), 1);
+        // The exact same bytes compacted as Python must MISS — not return the Rust
+        // skeleton — because the key includes the language.
+        cache.outline_cached(&mut py, SRC).unwrap();
+        assert_eq!(
+            cache.misses(),
+            2,
+            "same bytes under a different language must not be a cross-language hit"
+        );
+        assert_eq!(cache.hits(), 0);
     }
 
     #[test]

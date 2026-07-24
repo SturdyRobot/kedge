@@ -32,6 +32,8 @@ pub enum EvalError {
     BadTaskId,
     #[error("suite `baseline_ledger` path `{0}` escapes the suite directory")]
     UnsafeBaselinePath(PathBuf),
+    #[error("suite defines no metrics — an empty metric set would vacuously pass")]
+    NoMetrics,
 }
 
 // ── suite schema ──
@@ -243,7 +245,9 @@ pub fn evaluate(suite: &EvalSuite, baseline: &RunProfile, candidate: &RunProfile
         .collect();
     EvalReport {
         suite_name: suite.suite_name.clone(),
-        passed: results.iter().all(|r| r.passed),
+        // A suite with zero metrics must NOT report a vacuous pass (`all()` over an
+        // empty set is `true`) — that would mask every regression with exit 0.
+        passed: !results.is_empty() && results.iter().all(|r| r.passed),
         results,
     }
 }
@@ -355,6 +359,9 @@ pub fn run_eval(
     format: OutputFormat,
 ) -> Result<i32, EvalError> {
     let suite = EvalSuite::from_json_file(&suite_path)?;
+    if suite.metrics.is_empty() {
+        return Err(EvalError::NoMetrics);
+    }
     // Confine `baseline_ledger` to the suite file's own directory — a suite from an
     // untrusted source must not point it at an arbitrary file elsewhere on disk.
     let suite_dir = suite_path
@@ -397,6 +404,14 @@ mod tests {
             total_tokens: tokens,
             final_answer: answer.into(),
         }
+    }
+
+    #[test]
+    fn empty_metrics_do_not_vacuously_pass() {
+        // No metrics → the report must NOT pass (exit 0 would mask regressions).
+        let report = evaluate(&suite(vec![]), &profile(1, &["a"], 10, "x"), &profile(1, &["a"], 10, "x"));
+        assert!(!report.passed, "an empty metric set must not report a pass");
+        assert_eq!(report.exit_code(), 1);
     }
 
     #[test]
