@@ -391,9 +391,13 @@ fn source_and_compactor(args: &Value) -> Result<(String, Compactor)> {
     if let Some(p) = args.get("path").and_then(Value::as_str) {
         // Confine the read to the allowed root and cap its size before slurping.
         let path = resolve_read_under(mcp_root(), p)?;
-        let len = std::fs::metadata(&path)
-            .with_context(|| format!("stat `{p}`"))?
-            .len();
+        let meta = std::fs::metadata(&path).with_context(|| format!("stat `{p}`"))?;
+        // Only regular files: a FIFO/device/socket (e.g. /dev/zero) reports len 0,
+        // slipping past the size cap and then streaming unbounded into read_to_string.
+        if !meta.is_file() {
+            anyhow::bail!("`{p}` is not a regular file");
+        }
+        let len = meta.len();
         if len > MAX_COMPACT_FILE_BYTES {
             anyhow::bail!(
                 "`{p}` is {len} bytes; the compaction file limit is {MAX_COMPACT_FILE_BYTES} bytes"

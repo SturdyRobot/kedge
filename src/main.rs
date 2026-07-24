@@ -358,6 +358,17 @@ impl Config {
         if self.api_key_env.take().is_some() {
             stripped.push("api_key_env");
         }
+        // `db` is a file path. A normal in-project `db = "kedge.sqlite"` is fine,
+        // but an untrusted CWD must not redirect the journal OUT of the tree
+        // (absolute path, or one that climbs out with `..`).
+        if self
+            .db
+            .as_ref()
+            .is_some_and(|p| p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir))
+        {
+            self.db = None;
+            stripped.push("db");
+        }
         stripped
     }
 
@@ -407,6 +418,22 @@ mod config_trust_tests {
         assert_eq!(cfg.max_steps, Some(5));
         assert_eq!(cfg.model.as_deref(), Some("gpt-x"));
         assert_eq!(stripped, vec!["mcp", "api_base", "api_key_env"]);
+    }
+
+    #[test]
+    fn untrusted_db_may_stay_in_tree_but_not_escape() {
+        // A normal in-project ledger path survives.
+        let (cfg, stripped) =
+            Config::resolve(Some(parse(r#"db = "kedge.sqlite""#)), None);
+        assert_eq!(cfg.db.as_deref(), Some(std::path::Path::new("kedge.sqlite")));
+        assert!(!stripped.contains(&"db"));
+        // …but an absolute or climbing path is stripped (out-of-tree journal redirect).
+        let (cfg, stripped) =
+            Config::resolve(Some(parse(r#"db = "../../tmp/evil.sqlite""#)), None);
+        assert!(cfg.db.is_none());
+        assert!(stripped.contains(&"db"));
+        let (cfg, _) = Config::resolve(Some(parse(r#"db = "/etc/evil.sqlite""#)), None);
+        assert!(cfg.db.is_none());
     }
 
     #[test]
