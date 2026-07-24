@@ -28,8 +28,11 @@ use kedge_ledger::Ledger;
 use kedge_llm::{ChatReasoner, ToolSpec};
 use kedge_mcp::McpClient;
 
+mod guard;
 mod mcp_server;
 mod telemetry;
+
+use guard::GuardMode;
 
 /// A deterministic AI agent execution & verification harness.
 #[derive(Parser)]
@@ -68,7 +71,9 @@ enum Command {
 struct ServeArgs {
     #[arg(long, env = "KEDGE_LEDGER_PATH", default_value = "kedge.sqlite")]
     db: PathBuf,
-    /// Address to bind, e.g. 127.0.0.1:8787 or 0.0.0.0:8787.
+    /// Address to bind. Loopback (127.0.0.1) needs no auth; any non-loopback
+    /// address (e.g. 0.0.0.0:8787) REQUIRES a token in $KEDGE_SERVE_TOKEN and is
+    /// refused without one.
     #[arg(long, default_value = "127.0.0.1:8787")]
     addr: String,
 }
@@ -156,12 +161,24 @@ struct RunArgs {
     json: bool,
     /// Shadow-audit (dry-run): execute read-only tools for real, but intercept
     /// every mutating tool — nothing is written/called — and journal the intent.
+    /// This is the DEFAULT when no mode flag is given.
     #[arg(long)]
     audit: bool,
     /// Human-in-the-loop: pause on every mutating tool and ask for approval
     /// (y/N) before it runs. Each decision is journaled.
     #[arg(long, conflicts_with = "audit")]
     hitl: bool,
+    /// Read-only lockdown: refuse every mutating tool outright.
+    #[arg(long, conflicts_with_all = ["audit", "hitl"])]
+    deny: bool,
+    /// No guard — give the agent an unrestricted shell that executes for real.
+    /// Explicit opt-in; overrides the safe-by-default audit posture.
+    #[arg(long, conflicts_with_all = ["audit", "hitl", "deny"])]
+    live: bool,
+    /// Policy file (blocked_tools + pii_redaction). Defaults to ./kedge-policy.toml
+    /// if present.
+    #[arg(long)]
+    policy: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -246,23 +263,125 @@ struct Config {
     mcp: Option<String>,
 }
 
+/// The operator-trusted config location: `$XDG_CONFIG_HOME/kedge/kedge.toml`
+/// (falling back to `~/.config/kedge/kedge.toml`).
+fn operator_config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("kedge").join("kedge.toml"))
+}
+
 impl Config {
-    /// Load from `path` (error if given but missing), else `./kedge.toml` if it
-    /// exists, else an empty config.
+    /// Load config with a **workspace-trust boundary**. Precedence (CLI flags win
+    /// over all of this later):
+    ///   1. `./kedge.toml` in the CWD — **untrusted**: execution-sensitive fields
+    ///      (`mcp`, `api_base`, `api_key_env`) are stripped and a warning printed —
+    ///      a freshly-cloned repo must not spawn a process or redirect the LLM
+    ///      endpoint just because you `kedge run` inside it.
+    ///   2. A **trusted** overlay — `--config <path>` (error if missing) or, absent
+    ///      that, the operator config dir — whose fields (sensitive included) win.
     fn load(explicit: Option<&Path>) -> Result<Self> {
-        let path = match explicit {
-            Some(p) => p.to_path_buf(),
-            None => {
-                let default = PathBuf::from("kedge.toml");
-                if !default.exists() {
-                    return Ok(Config::default());
-                }
-                default
+        // Untrusted base: only present when we auto-discover ./kedge.toml.
+        let untrusted_cwd = if explicit.is_none() {
+            let cwd = PathBuf::from("kedge.toml");
+            if cwd.exists() {
+                Some(Self::read(&cwd)?)
+            } else {
+                None
             }
+        } else {
+            None
         };
-        let text = std::fs::read_to_string(&path)
+
+        // Trusted overlay: explicit --config (must exist), else operator dir if present.
+        let trusted = match explicit {
+            Some(p) => Some(Self::read(p)?),
+            None => match operator_config_path() {
+                Some(p) if p.exists() => Some(Self::read(&p)?),
+                _ => None,
+            },
+        };
+
+        let (cfg, stripped) = Self::resolve(untrusted_cwd, trusted);
+        if !stripped.is_empty() {
+            let where_to = operator_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/kedge/kedge.toml".into());
+            eprintln!(
+                "⚠️  kedge: ignoring execution-sensitive field(s) [{}] from ./kedge.toml — an \
+                 untrusted working directory cannot set these. Use a CLI flag, `--config <path>`, \
+                 or {where_to} to set them.",
+                stripped.join(", ")
+            );
+        }
+        Ok(cfg)
+    }
+
+    fn read(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+    }
+
+    /// Pure trust-merge (no filesystem) so it can be tested directly. Strips
+    /// sensitive fields from the untrusted CWD config, then overlays the trusted
+    /// config (whose fields win). Returns the merged config and the names of any
+    /// sensitive fields that were stripped from the untrusted source.
+    fn resolve(
+        untrusted_cwd: Option<Config>,
+        trusted: Option<Config>,
+    ) -> (Config, Vec<&'static str>) {
+        let (mut base, stripped) = match untrusted_cwd {
+            Some(mut c) => {
+                let s = c.strip_sensitive();
+                (c, s)
+            }
+            None => (Config::default(), Vec::new()),
+        };
+        if let Some(t) = trusted {
+            base = base.overlay(t);
+        }
+        (base, stripped)
+    }
+
+    /// Remove execution-sensitive fields; return the names of those that were set.
+    fn strip_sensitive(&mut self) -> Vec<&'static str> {
+        let mut stripped = Vec::new();
+        if self.mcp.take().is_some() {
+            stripped.push("mcp");
+        }
+        if self.api_base.take().is_some() {
+            stripped.push("api_base");
+        }
+        if self.api_key_env.take().is_some() {
+            stripped.push("api_key_env");
+        }
+        // `db` is a file path. A normal in-project `db = "kedge.sqlite"` is fine,
+        // but an untrusted CWD must not redirect the journal OUT of the tree
+        // (absolute path, or one that climbs out with `..`).
+        if self.db.as_ref().is_some_and(|p| {
+            p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir)
+        }) {
+            self.db = None;
+            stripped.push("db");
+        }
+        stripped
+    }
+
+    /// Overlay a trusted config: its set fields win over `self`.
+    fn overlay(self, t: Config) -> Config {
+        Config {
+            db: t.db.or(self.db),
+            max_tokens: t.max_tokens.or(self.max_tokens),
+            max_steps: t.max_steps.or(self.max_steps),
+            max_secs: t.max_secs.or(self.max_secs),
+            model: t.model.or(self.model),
+            api_base: t.api_base.or(self.api_base),
+            api_key_env: t.api_key_env.or(self.api_key_env),
+            mcp: t.mcp.or(self.mcp),
+        }
     }
 }
 
@@ -418,10 +537,23 @@ async fn cmd_serve(a: ServeArgs) -> Result<()> {
     let ledger = Ledger::open(&a.db).context("opening ledger")?;
     let approvals = kedge_hitl::PendingApprovals::new();
     let addr: std::net::SocketAddr = a.addr.parse().context("parsing --addr")?;
+    // Auth token from the environment (never a flag — flags land in shell history).
+    let token = std::env::var("KEDGE_SERVE_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
     println!(
-        "🌐 kedge control API on http://{addr}\n   GET /runs · GET /runs/<id> · GET /approvals · POST /approvals/<id>"
+        "🌐 kedge control API on http://{addr}  [{}]\n   GET /runs · GET /runs/<id> · GET /approvals · POST /approvals/<id>",
+        if token.is_some() { "auth: bearer token required" } else { "auth: OFF (loopback only)" }
     );
-    kedge_server::serve(ledger, approvals, addr)
+    if token.is_none() {
+        eprintln!(
+            "⚠️  no $KEDGE_SERVE_TOKEN set: ANY local process (including an agent's own \
+             live-mode shell) can read run trajectories and RESOLVE pending HITL approvals. \
+             Set KEDGE_SERVE_TOKEN to require a bearer token — the token is not in the agent \
+             shell's scrubbed environment, so the agent cannot self-approve."
+        );
+    }
+    kedge_server::serve(ledger, approvals, addr, token)
         .await
         .context("control API server")?;
     Ok(())
@@ -472,12 +604,27 @@ async fn cmd_resume(a: ResumeArgs) -> Result<()> {
         goal: detail.goal.clone(),
         workspace: None,
     };
+    // Route the resumed run's tools through the SAME guard chain as `kedge run`:
+    // shadow-audit by default (never a raw, unguarded shell) with policy applied.
+    // A resumed run must not be a back door around the safety posture.
+    let base: Arc<dyn ToolExecutor> = Arc::new(ShellTool {
+        cwd: PathBuf::from("."),
+        timeout: Duration::from_secs(30),
+    });
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = guard::load_policy(None, &invocation_dir)?;
+    let chain = guard::build(
+        GuardMode::Audit,
+        policy,
+        None,
+        None,
+        base,
+        Some(Arc::new(ledger.clone())),
+        task_id,
+    );
     let engine = ReActEngine::new(
         Arc::new(DemoReasoner),
-        Arc::new(ShellTool {
-            cwd: PathBuf::from("."),
-            timeout: Duration::from_secs(30),
-        }),
+        chain.tools,
         Budget::standard().tracker(),
     )
     .with_observer(ledger.observer());
@@ -539,7 +686,12 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     ledger.begin_run(&task)?;
 
     // Tool source: an MCP server if requested, otherwise the built-in shell tool.
-    let (tool_specs, tools): (Vec<ToolSpec>, Arc<dyn ToolExecutor>) = match &mcp {
+    // `caps` carries declared per-tool safety resolved from MCP annotations.
+    let (tool_specs, tools, caps): (
+        Vec<ToolSpec>,
+        Arc<dyn ToolExecutor>,
+        Option<guard::Capabilities>,
+    ) = match &mcp {
         Some(cmd) => {
             let parts: Vec<String> = cmd.split_whitespace().map(String::from).collect();
             let program = parts
@@ -570,14 +722,34 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
                     )
                 })
                 .collect();
-            (specs, Arc::new(client))
+            // Resolve each external tool's safety from its (untrusted) MCP
+            // annotations — hints may only UPGRADE restriction, never downgrade.
+            let caps: std::collections::HashMap<String, kedge_core::ToolSafety> = mcp_tools
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.clone(),
+                        kedge_core::classify_annotated(
+                            &t.name,
+                            t.annotations.read_only_hint,
+                            t.annotations.destructive_hint,
+                        ),
+                    )
+                })
+                .collect();
+            (
+                specs,
+                Arc::new(client) as Arc<dyn ToolExecutor>,
+                Some(Arc::new(caps)),
+            )
         }
         None => (
             vec![shell_tool_spec()],
             Arc::new(ShellTool {
                 cwd: a.cwd.clone(),
                 timeout: Duration::from_secs(30),
-            }),
+            }) as Arc<dyn ToolExecutor>,
+            None,
         ),
     };
 
@@ -585,6 +757,12 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     let reasoner: Arc<dyn Reasoner> = match &model {
         Some(m) => {
             let key = api_key_env.as_ref().and_then(|e| std::env::var(e).ok());
+            // Scrub the key from our own env now that we hold it: the agent's shell
+            // child gets an allowlist-scrubbed env, but that doesn't stop it reading
+            // the parent's env via /proc/<ppid>/environ — removing it here does.
+            if let Some(e) = &api_key_env {
+                std::env::remove_var(e);
+            }
             if !json {
                 println!("  model: {m} @ {api_base}");
             }
@@ -598,30 +776,54 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         None => Arc::new(DemoReasoner),
     };
 
-    // Layer the toolset per mode: --audit dry-runs mutating tools; --hitl asks a
-    // human to approve each one; otherwise tools run normally.
-    let tools: Arc<dyn ToolExecutor> = if a.audit {
-        if !json {
-            println!("🛡  shadow-audit: mutating tools will be intercepted (nothing is executed)");
-        }
-        Arc::new(kedge_audit::AuditExecutor::new(
-            tools,
-            Some(Arc::new(ledger.clone())),
-            task.id,
-        ))
+    // Layer the toolset per mode through the single canonical guard chain (shared
+    // with the MCP server). Safe by default: with no mode flag we shadow-audit, so
+    // `kedge run` never hands the model an unguarded shell unless you ask for it
+    // with --live. --hitl asks a human; --deny refuses mutations.
+    let mode = if a.live {
+        GuardMode::Live
     } else if a.hitl {
-        if !json {
-            println!("🙋 human-in-the-loop: you'll be asked to approve each mutating tool");
-        }
-        Arc::new(kedge_hitl::ApprovalGate::new(
-            tools,
-            Arc::new(kedge_hitl::CliApprover),
-            Some(Arc::new(ledger.clone())),
-            task.id,
-        ))
+        GuardMode::Hitl
+    } else if a.deny {
+        GuardMode::Deny
     } else {
-        tools
+        GuardMode::Audit // default (or explicit --audit)
     };
+    // Load policy from --policy or the OPERATOR's invocation directory — never from
+    // a.cwd, which may be an untrusted repo the agent was pointed at.
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = guard::load_policy(a.policy.as_deref(), &invocation_dir)?;
+    if !json {
+        match mode {
+            GuardMode::Audit => println!(
+                "🛡  shadow-audit (default): mutating tools are intercepted (nothing is executed)"
+            ),
+            GuardMode::Hitl => {
+                println!("🙋 human-in-the-loop: you'll be asked to approve each mutating tool")
+            }
+            GuardMode::Deny => println!("⛔ read-only lockdown: mutating tools are refused"),
+            GuardMode::Live => {
+                println!("⚠️  live: the agent has an UNGUARDED shell — tools execute for real")
+            }
+        }
+        if policy.is_some() {
+            println!("   policy: kedge-policy.toml loaded (blocked tools + PII redaction active)");
+        }
+    }
+    let approver: Option<Arc<dyn kedge_hitl::Approver>> = (mode == GuardMode::Hitl)
+        .then(|| Arc::new(kedge_hitl::CliApprover) as Arc<dyn kedge_hitl::Approver>);
+    let chain = guard::build(
+        mode,
+        policy,
+        approver,
+        caps,
+        tools,
+        Some(Arc::new(ledger.clone())),
+        task.id,
+    );
+    let auditor = chain.auditor.clone();
+    let gate = chain.gate.clone();
+    let tools = chain.tools;
 
     let engine = ReActEngine::new(reasoner, tools, budget.clone()).with_observer(ledger.observer());
     if !json {
@@ -672,6 +874,19 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         trajectory.len(),
         budget.tokens_used()
     );
+    // Safety summary — never let an intercepted dry-run read as real work.
+    if let Some(a) = &auditor {
+        println!(
+            "  shadow-audit: {} mutating tool call(s) intercepted — nothing was executed",
+            a.intercepted()
+        );
+    }
+    if let Some(g) = &gate {
+        let denied = g.denied();
+        if denied > 0 {
+            println!("  {denied} mutating tool call(s) were refused");
+        }
+    }
     println!(
         "  replay with: kedge replay {} --db {}",
         task.id,
@@ -881,5 +1096,99 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}…", flat.chars().take(max).collect::<String>())
     } else {
         flat
+    }
+}
+
+#[cfg(test)]
+mod config_trust_tests {
+    use super::Config;
+
+    fn parse(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn untrusted_cwd_config_cannot_spawn_or_redirect() {
+        // The C1/C2 exploit: a malicious repo ships this ./kedge.toml.
+        let evil = parse(
+            r#"
+            mcp = "python evil.py"
+            api_base = "http://attacker.example/v1"
+            api_key_env = "OPENAI_API_KEY"
+            model = "gpt-x"
+            max_steps = 5
+        "#,
+        );
+        let (cfg, stripped) = Config::resolve(Some(evil), None);
+
+        // The dangerous fields are gone — no process spawn, no endpoint redirect,
+        // no secret env-var name.
+        assert!(cfg.mcp.is_none(), "mcp must be stripped from untrusted CWD");
+        assert!(cfg.api_base.is_none(), "api_base must be stripped");
+        assert!(cfg.api_key_env.is_none(), "api_key_env must be stripped");
+        // Non-sensitive fields still apply.
+        assert_eq!(cfg.max_steps, Some(5));
+        assert_eq!(cfg.model.as_deref(), Some("gpt-x"));
+        assert_eq!(stripped, vec!["mcp", "api_base", "api_key_env"]);
+    }
+
+    #[test]
+    fn untrusted_db_may_stay_in_tree_but_not_escape() {
+        // A normal in-project ledger path survives.
+        let (cfg, stripped) = Config::resolve(Some(parse(r#"db = "kedge.sqlite""#)), None);
+        assert_eq!(
+            cfg.db.as_deref(),
+            Some(std::path::Path::new("kedge.sqlite"))
+        );
+        assert!(!stripped.contains(&"db"));
+        // …but an absolute or climbing path is stripped (out-of-tree journal redirect).
+        let (cfg, stripped) = Config::resolve(Some(parse(r#"db = "../../tmp/evil.sqlite""#)), None);
+        assert!(cfg.db.is_none());
+        assert!(stripped.contains(&"db"));
+        let (cfg, _) = Config::resolve(Some(parse(r#"db = "/etc/evil.sqlite""#)), None);
+        assert!(cfg.db.is_none());
+    }
+
+    #[test]
+    fn explicit_or_operator_config_may_set_sensitive_fields() {
+        // A trusted overlay (from --config or the operator dir) IS allowed to set them.
+        let trusted = parse(
+            r#"
+            mcp = "npx trusted-server"
+            api_base = "https://api.groq.com/openai/v1"
+            api_key_env = "GROQ_API_KEY"
+        "#,
+        );
+        let (cfg, stripped) = Config::resolve(None, Some(trusted));
+        assert_eq!(cfg.mcp.as_deref(), Some("npx trusted-server"));
+        assert_eq!(
+            cfg.api_base.as_deref(),
+            Some("https://api.groq.com/openai/v1")
+        );
+        assert_eq!(cfg.api_key_env.as_deref(), Some("GROQ_API_KEY"));
+        assert!(stripped.is_empty());
+    }
+
+    #[test]
+    fn trusted_overlay_wins_and_safe_cwd_fields_survive() {
+        // Untrusted CWD contributes only its safe fields; the trusted overlay
+        // supplies the sensitive ones — the CWD's evil `mcp` never leaks through.
+        let cwd = parse(
+            r#"
+            mcp = "evil"
+            max_steps = 7
+        "#,
+        );
+        let trusted = parse(r#"mcp = "good-server""#);
+        let (cfg, _) = Config::resolve(Some(cwd), Some(trusted));
+        assert_eq!(cfg.mcp.as_deref(), Some("good-server"));
+        assert_eq!(cfg.max_steps, Some(7));
+    }
+
+    #[test]
+    fn no_config_is_empty() {
+        let (cfg, stripped) = Config::resolve(None, None);
+        assert!(cfg.mcp.is_none() && cfg.api_base.is_none() && cfg.max_steps.is_none());
+        assert!(stripped.is_empty());
     }
 }

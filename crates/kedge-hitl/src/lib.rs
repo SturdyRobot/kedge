@@ -19,6 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kedge_audit::{classify, Risk, ToolSafety};
+
+/// A pre-resolved per-tool safety map (name → safety), e.g. from MCP annotations.
+pub type Capabilities = Arc<HashMap<String, ToolSafety>>;
 use kedge_core::{Observation, TaskId, ToolCall, ToolExecutor};
 use kedge_ledger::{Event, Ledger};
 use tokio::sync::oneshot;
@@ -233,6 +236,9 @@ pub struct ApprovalGate {
     ledger: Option<Arc<Ledger>>,
     run_id: TaskId,
     denied: AtomicU64,
+    /// Pre-resolved per-tool safety (e.g. from MCP annotations), consulted before
+    /// name-based [`classify`]. `None` → pure name classification.
+    caps: Option<Capabilities>,
 }
 
 impl ApprovalGate {
@@ -248,7 +254,22 @@ impl ApprovalGate {
             ledger,
             run_id,
             denied: AtomicU64::new(0),
+            caps: None,
         }
+    }
+
+    /// Attach a declared-capability map (name → resolved safety). Entries win over
+    /// name-based classification; unknown names still fall back to [`classify`].
+    pub fn with_capabilities(mut self, caps: Option<Capabilities>) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    fn safety_of(&self, name: &str) -> ToolSafety {
+        self.caps
+            .as_ref()
+            .and_then(|m| m.get(name).copied())
+            .unwrap_or_else(|| classify(name))
     }
 
     /// How many tool calls a human has denied.
@@ -260,7 +281,7 @@ impl ApprovalGate {
 #[async_trait::async_trait]
 impl ToolExecutor for ApprovalGate {
     async fn execute(&self, call: &ToolCall) -> kedge_core::Result<Observation> {
-        let risk = match classify(&call.name) {
+        let risk = match self.safety_of(&call.name) {
             ToolSafety::ReadOnly => return self.inner.execute(call).await,
             ToolSafety::Mutating { risk } => risk,
         };
@@ -270,15 +291,29 @@ impl ToolExecutor for ApprovalGate {
         tracing::info!(tool = %call.name, risk = risk.as_str(), approved, "HITL approval decision");
 
         if let Some(ledger) = &self.ledger {
-            let _ = ledger.record_event(
-                self.run_id,
-                &Event::ToolApprovalDecision {
-                    tool: call.name.clone(),
-                    risk: risk.as_str().to_string(),
-                    approved,
-                    arguments: call.arguments.clone(),
-                },
-            );
+            // "A permanent record of who let what through" is the guarantee. If the
+            // decision can't be journaled, halt before executing an approved-but-
+            // unrecorded mutation — never let a side effect happen off the record.
+            ledger
+                .record_event(
+                    self.run_id,
+                    &Event::ToolApprovalDecision {
+                        tool: call.name.clone(),
+                        risk: risk.as_str().to_string(),
+                        approved,
+                        arguments: call.arguments.clone(),
+                    },
+                )
+                .map_err(|e| {
+                    kedge_core::HarnessError::backend(
+                        "hitl-journal",
+                        format!(
+                            "failed to journal the approval decision for `{}` — refusing to \
+                             proceed off the record: {e}",
+                            call.name
+                        ),
+                    )
+                })?;
         }
 
         if approved {

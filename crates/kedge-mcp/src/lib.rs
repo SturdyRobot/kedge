@@ -28,6 +28,34 @@ use tokio::sync::oneshot;
 
 use kedge_core::HarnessError;
 
+// ── Bounds against a hostile/compromised MCP server ──
+//
+// A connected server fully controls its tool metadata and results. These caps
+// keep it from exhausting memory, blowing the token budget, or smuggling an
+// unbounded prompt-injection payload through a tool description.
+
+/// Max bytes retained from a single `tools/call` result before it's journaled and
+/// handed to the model.
+const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024; // 1 MiB
+/// Max bytes of a server-supplied tool `description` (which is spliced verbatim
+/// into the model's system prompt — a prompt-injection / token-DoS surface).
+const MAX_TOOL_DESC_BYTES: usize = 2048;
+/// Max SSE accumulation buffer before we give up waiting for a frame terminator.
+const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Truncate `s` to at most `max` bytes on a char boundary, appending a marker so
+/// the truncation is visible (never silent).
+fn truncate_marked(s: String, max: usize, what: &str) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…[{what} truncated at {max} bytes]", &s[..end])
+}
+
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("transport i/o error: {0}")]
@@ -417,6 +445,14 @@ async fn read_sse_response(
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| McpError::Protocol(format!("sse read: {e}")))?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
+            // Bound the accumulator: a hostile server that streams bytes without
+            // ever sending a frame terminator would otherwise grow this without
+            // limit until the deadline.
+            if buf.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(McpError::Protocol(format!(
+                    "sse frame exceeded {MAX_SSE_BUFFER_BYTES} bytes without a terminator"
+                )));
+            }
             // Process every complete frame (terminated by a blank line).
             while let Some(idx) = buf.find("\n\n").or_else(|| buf.find("\r\n\r\n")) {
                 let sep = if buf[idx..].starts_with("\n\n") { 2 } else { 4 };
@@ -485,6 +521,20 @@ pub struct McpTool {
     pub description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Value,
+    /// Behavioral hints from the MCP spec's tool `annotations`. Treated as
+    /// **untrusted** — used only to make a tool's safety classification *more*
+    /// restrictive, never less (see `kedge_core::classify_annotated`).
+    #[serde(default)]
+    pub annotations: ToolAnnotations,
+}
+
+/// The subset of MCP tool `annotations` that affects safety classification.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolAnnotations {
+    #[serde(default, rename = "readOnlyHint")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, rename = "destructiveHint")]
+    pub destructive_hint: Option<bool>,
 }
 
 /// The distilled result of a `tools/call`.
@@ -642,7 +692,14 @@ impl McpClient {
             .get("tools")
             .cloned()
             .ok_or_else(|| McpError::Protocol("tools/list missing `tools`".into()))?;
-        let tools: Vec<McpTool> = serde_json::from_value(tools)?;
+        let mut tools: Vec<McpTool> = serde_json::from_value(tools)?;
+        // Bound each server-supplied description before it can reach the model's
+        // system prompt (defense-in-depth against prompt-injection / token DoS).
+        for t in &mut tools {
+            if let Some(d) = t.description.take() {
+                t.description = Some(truncate_marked(d, MAX_TOOL_DESC_BYTES, "description"));
+            }
+        }
         tracing::Span::current().record("tool_count", tools.len());
         Ok(tools)
     }
@@ -668,6 +725,9 @@ impl McpClient {
                     .join("\n")
             })
             .unwrap_or_default();
+        // Bound the result before it's journaled and returned to the model — a
+        // hostile server can't blow up memory / the ledger / the token budget.
+        let text = truncate_marked(text, MAX_TOOL_RESULT_BYTES, "tool result");
         tracing::Span::current().record("is_error", is_error);
         Ok(ToolResult {
             text,
@@ -742,17 +802,32 @@ impl McpClientManager {
     /// sink the whole fleet.
     #[tracing::instrument(name = "mcp.connect_all", skip_all, fields(configured = configs.len(), connected = tracing::field::Empty))]
     pub async fn connect(configs: &[McpServerConfig], client_name: &str) -> Result<Self> {
-        let mut servers = Vec::new();
-        let mut routes = HashMap::new();
-        let mut tools = Vec::new();
+        let mut servers: Vec<ManagedServer> = Vec::new();
+        let mut routes: HashMap<String, usize> = HashMap::new();
+        let mut tools: Vec<McpTool> = Vec::new();
         for cfg in configs {
             match Self::connect_one(cfg, client_name).await {
                 Ok((client, server_tools)) => {
                     let idx = servers.len();
-                    for t in &server_tools {
-                        routes.entry(t.name.clone()).or_insert(idx);
+                    for t in server_tools {
+                        // A name collision means a later server is trying to claim a
+                        // tool an earlier one already owns. Keep the first (routing is
+                        // by config order), but WARN loudly and drop the duplicate so
+                        // the model never sees two tools with the same name and
+                        // conflicting descriptions — the route-shadowing trap.
+                        if let Some(&owner) = routes.get(&t.name) {
+                            tracing::warn!(
+                                tool = %t.name,
+                                owner = %servers[owner].name,
+                                shadowed = %cfg.name,
+                                "duplicate MCP tool name — ignoring the later server's tool; \
+                                 check your server order, a shadowing server can hijack calls"
+                            );
+                            continue;
+                        }
+                        routes.insert(t.name.clone(), idx);
+                        tools.push(t);
                     }
-                    tools.extend(server_tools);
                     servers.push(ManagedServer {
                         name: cfg.name.clone(),
                         client,
@@ -848,6 +923,25 @@ impl kedge_core::ToolExecutor for McpClientManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_marked_bounds_and_flags() {
+        // Under the cap: unchanged.
+        assert_eq!(truncate_marked("hi".into(), 10, "x"), "hi");
+        // Over the cap: truncated to <= max bytes of content + a visible marker.
+        let big = "a".repeat(5000);
+        let out = truncate_marked(big, 100, "tool result");
+        assert!(out.contains("truncated at 100 bytes"));
+        assert!(out.starts_with(&"a".repeat(100)));
+    }
+
+    #[test]
+    fn truncate_marked_respects_char_boundaries() {
+        // A multibyte char straddling the cap must not panic or split mid-char.
+        let s = "é".repeat(100); // 2 bytes each
+        let out = truncate_marked(s, 51, "x"); // odd cap lands mid-char
+        assert!(out.contains("truncated"));
+    }
 
     /// Spin up an in-memory MCP-ish server on a duplex pair and return a client
     /// wired to it. The server handles initialize / tools/list / tools/call.

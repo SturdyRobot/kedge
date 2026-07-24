@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -41,6 +41,25 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025
 const GROQ_API_BASE: &str = "https://api.groq.com/openai/v1";
 const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
 
+/// The Groq key, read from the environment **once** at startup and then removed
+/// from our own process environment. The agent's `shell` tool already gets an
+/// allowlist-scrubbed env, but that alone doesn't stop a child from reading the
+/// *parent's* environment via `/proc/<ppid>/environ`; removing the key here closes
+/// that path. Cached because the MCP server is long-lived and serves many runs.
+static GROQ_KEY: OnceLock<Option<String>> = OnceLock::new();
+
+fn groq_key() -> Option<&'static str> {
+    GROQ_KEY
+        .get_or_init(|| {
+            let k = std::env::var("GROQ_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty());
+            std::env::remove_var("GROQ_API_KEY");
+            k
+        })
+        .as_deref()
+}
+
 /// Negotiate the protocol revision: echo the client's only if we speak it.
 fn negotiate_version(requested: Option<&str>) -> &'static str {
     match requested {
@@ -64,6 +83,9 @@ type SharedOut = Arc<tokio::sync::Mutex<Stdout>>;
 /// `kedge_compact`. JSON-RPC correlates by `id`, so out-of-order replies are
 /// expected and fine.
 pub async fn serve_stdio() -> Result<()> {
+    // Read + scrub the Groq key from our own env immediately, before any run can
+    // spawn a shell child that might read it back out of `/proc/self/environ`.
+    let _ = groq_key();
     let mut reader = BufReader::new(tokio::io::stdin()).lines();
     let out: SharedOut = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     // The MCP handshake must precede any tool traffic.
@@ -219,8 +241,22 @@ fn tool_specs() -> Value {
             }
         },
         {
+            "name": "kedge_expand",
+            "description": "The inverse of kedge_compact: return the full source of the named function(s) a skeleton elided, bodies included. Use this after orienting on a compacted skeleton when you need to EDIT a specific function whose body you never saw — fetch just that body instead of re-reading the whole file. The skeleton shows each name above its `/* … elided */` marker, so you already know what to ask for. Deterministic, no LLM.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "The function or method name to expand (as shown in the skeleton signature)." },
+                    "path": { "type": "string", "description": "Path to the source file; language detected from its extension." },
+                    "code": { "type": "string", "description": "Raw source text (use together with `lang` instead of `path`)." },
+                    "lang": { "type": "string", "enum": ["rust", "python", "javascript", "typescript", "go"], "description": "Force or declare the language." }
+                },
+                "required": ["symbol"]
+            }
+        },
+        {
             "name": "kedge_audit",
-            "description": "Forensic report from an Kedge SQLite ledger: total runs, tokens consumed, intercepted mutations (Shadow-Guard dry-runs), and — when pricing is supplied — a cost projection. Deterministic, no LLM.",
+            "description": "Forensic report from a Kedge SQLite ledger: total runs, tokens consumed, intercepted mutations (Shadow-Guard dry-runs), and — when pricing is supplied — a cost projection. Deterministic, no LLM.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -261,6 +297,7 @@ async fn handle_tool_call(params: &Value) -> Value {
 
     let outcome: Result<String> = match name {
         "kedge_compact" => tool_compact(&args),
+        "kedge_expand" => tool_expand(&args),
         "kedge_audit" => tool_audit(&args),
         "kedge_run" => tool_run(&args).await,
         other => Err(anyhow::anyhow!("unknown tool `{other}`")),
@@ -274,21 +311,137 @@ async fn handle_tool_call(params: &Value) -> Value {
     }
 }
 
-fn tool_compact(args: &Value) -> Result<String> {
+/// Cap on a file the compaction tools will slurp into memory. Prevents a hostile
+/// `path` (`/dev/zero`, a multi-GB file) from OOM-killing the server.
+const MAX_COMPACT_FILE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+
+/// The directory MCP file operations (`path`, `db`) are confined to. Set via
+/// `$KEDGE_MCP_ROOT`, else the server's current working directory. Canonicalized
+/// once at first use, so an operator who launches the server in a project root
+/// scopes every file the model can read/write to that tree.
+static MCP_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+fn mcp_root() -> &'static Path {
+    MCP_ROOT.get_or_init(|| {
+        let raw = std::env::var_os("KEDGE_MCP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        std::fs::canonicalize(&raw).unwrap_or(raw)
+    })
+}
+
+/// Resolve a caller-supplied path *for reading*, confined under `root`. Rejects
+/// traversal (`..`), symlink escapes, and absolute paths outside the root. The
+/// file must exist (so `canonicalize` fully resolves it).
+fn resolve_read_under(root: &Path, p: &str) -> Result<PathBuf> {
+    let c = Path::new(p);
+    let target = if c.is_absolute() {
+        c.to_path_buf()
+    } else {
+        root.join(c)
+    };
+    let canon = std::fs::canonicalize(&target).with_context(|| format!("resolving path `{p}`"))?;
+    if !canon.starts_with(root) {
+        anyhow::bail!(
+            "`{p}` resolves outside the allowed root {} — set KEDGE_MCP_ROOT to widen access",
+            root.display()
+        );
+    }
+    Ok(canon)
+}
+
+/// Resolve a caller-supplied path *for writing* (e.g. a ledger db), confined under
+/// `root`. The parent directory must exist and be inside the root; the file itself
+/// need not exist yet.
+fn resolve_write_under(root: &Path, p: &str) -> Result<PathBuf> {
+    let c = Path::new(p);
+    let target = if c.is_absolute() {
+        c.to_path_buf()
+    } else {
+        root.join(c)
+    };
+    let parent = target
+        .parent()
+        .filter(|pp| !pp.as_os_str().is_empty())
+        .unwrap_or(root);
+    let canon_parent =
+        std::fs::canonicalize(parent).with_context(|| format!("resolving parent of `{p}`"))?;
+    if !canon_parent.starts_with(root) {
+        anyhow::bail!("`{p}` is outside the allowed root {}", root.display());
+    }
+    let name = target.file_name().context("path has no filename")?;
+    Ok(canon_parent.join(name))
+}
+
+/// Resolve a ledger `db` argument: a caller-supplied path is confined under
+/// [`mcp_root`]; absent, the operator's default (`resolve_ledger_path`, which
+/// honors `$KEDGE_LEDGER_PATH`) is trusted.
+fn resolve_db(args: &Value, for_read: bool) -> Result<PathBuf> {
+    match args.get("db").and_then(Value::as_str) {
+        Some(p) if for_read => resolve_read_under(mcp_root(), p),
+        Some(p) => resolve_write_under(mcp_root(), p),
+        None => Ok(kedge_ledger::resolve_ledger_path(None)),
+    }
+}
+
+/// Resolve the `path` / `code`+`lang` argument pair (shared by compact + expand)
+/// into the source text and a `Compactor` for the right language.
+fn source_and_compactor(args: &Value) -> Result<(String, Compactor)> {
     let lang = args.get("lang").and_then(Value::as_str);
-    let (source, mut compactor) = if let Some(p) = args.get("path").and_then(Value::as_str) {
-        let src = std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?;
+    if let Some(p) = args.get("path").and_then(Value::as_str) {
+        // Confine the read to the allowed root and cap its size before slurping.
+        let path = resolve_read_under(mcp_root(), p)?;
+        let meta = std::fs::metadata(&path).with_context(|| format!("stat `{p}`"))?;
+        // Only regular files: a FIFO/device/socket (e.g. /dev/zero) reports len 0,
+        // slipping past the size cap and then streaming unbounded into read_to_string.
+        if !meta.is_file() {
+            anyhow::bail!("`{p}` is not a regular file");
+        }
+        let len = meta.len();
+        if len > MAX_COMPACT_FILE_BYTES {
+            anyhow::bail!(
+                "`{p}` is {len} bytes; the compaction file limit is {MAX_COMPACT_FILE_BYTES} bytes"
+            );
+        }
+        let src = std::fs::read_to_string(&path).with_context(|| format!("reading {p}"))?;
         let compactor = match lang {
             Some(l) => Compactor::new(parse_lang(l)?)?,
-            None => Compactor::for_path(Path::new(p))?,
+            None => Compactor::for_path(&path)?,
         };
-        (src, compactor)
+        Ok((src, compactor))
     } else if let Some(code) = args.get("code").and_then(Value::as_str) {
         let l = lang.context("`lang` is required when passing `code`")?;
-        (code.to_string(), Compactor::new(parse_lang(l)?)?)
+        Ok((code.to_string(), Compactor::new(parse_lang(l)?)?))
     } else {
-        anyhow::bail!("provide `path`, or `code` together with `lang`");
-    };
+        anyhow::bail!("provide `path`, or `code` together with `lang`")
+    }
+}
+
+/// Bring back the full source of the named function(s) a skeleton elided — the
+/// "act on it" half of compaction. After orienting on a `kedge_compact`
+/// skeleton, call this to fetch just the body you need to edit.
+fn tool_expand(args: &Value) -> Result<String> {
+    let symbol = args
+        .get("symbol")
+        .and_then(Value::as_str)
+        .context("`symbol` is required — the function/method name to expand")?;
+    let (source, mut compactor) = source_and_compactor(args)?;
+    let matches = compactor.expand(&source, symbol)?;
+    let out = json!({
+        "symbol": symbol,
+        "match_count": matches.len(),
+        "matches": matches,
+        "note": if matches.is_empty() {
+            "no function/method by that name — read the file directly"
+        } else {
+            "full source of each match, bodies included; safe to edit from these"
+        },
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
+}
+
+fn tool_compact(args: &Value) -> Result<String> {
+    let (source, mut compactor) = source_and_compactor(args)?;
 
     let result = match args.get("max_tokens").and_then(Value::as_u64) {
         Some(max) => compactor.compact_to_budget(&source, max as usize)?,
@@ -306,8 +459,7 @@ fn tool_compact(args: &Value) -> Result<String> {
     );
     // Best-effort: journal this saving so `kedge_audit` can report a cumulative
     // "tokens saved" total. A ledger problem never fails the compaction itself.
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, false)?;
     let cumulative = match Ledger::open(&db) {
         Ok(ledger) => {
             let label = args.get("path").and_then(Value::as_str);
@@ -344,8 +496,7 @@ fn tool_compact(args: &Value) -> Result<String> {
 }
 
 fn tool_audit(args: &Value) -> Result<String> {
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, true)?;
     let price = args.get("price_per_1k").and_then(Value::as_f64);
     let runs = args.get("runs_per_day").and_then(Value::as_u64);
     let report = kedge_audit::AuditReport::from_ledger(&db, price, runs)
@@ -393,6 +544,20 @@ impl RunMode {
 ///
 /// `CliApprover` is deliberately never used here: it prints to stdout and reads
 /// stdin, which are this process's JSON-RPC channel.
+impl RunMode {
+    fn as_guard_mode(self) -> crate::guard::GuardMode {
+        match self {
+            RunMode::Audit => crate::guard::GuardMode::Audit,
+            RunMode::Deny => crate::guard::GuardMode::Deny,
+            RunMode::Live => crate::guard::GuardMode::Live,
+        }
+    }
+}
+
+/// Thin wrapper over the canonical [`crate::guard::build`] (no policy here — the
+/// MCP path loads policy at the call site). Kept so the mode-behavior tests read
+/// against the same chain the real run uses.
+#[cfg(test)]
 fn build_guarded_tools(
     mode: RunMode,
     base: Arc<dyn ToolExecutor>,
@@ -402,22 +567,8 @@ fn build_guarded_tools(
     Arc<dyn ToolExecutor>,
     Option<Arc<kedge_audit::AuditExecutor>>,
 ) {
-    match mode {
-        RunMode::Live => (base, None),
-        RunMode::Deny => (
-            Arc::new(kedge_hitl::ApprovalGate::new(
-                base,
-                Arc::new(kedge_hitl::DenyingApprover),
-                ledger,
-                run_id,
-            )),
-            None,
-        ),
-        RunMode::Audit => {
-            let ae = Arc::new(kedge_audit::AuditExecutor::new(base, ledger, run_id));
-            (ae.clone() as Arc<dyn ToolExecutor>, Some(ae))
-        }
-    }
+    let chain = crate::guard::build(mode.as_guard_mode(), None, None, None, base, ledger, run_id);
+    (chain.tools, chain.auditor)
 }
 
 async fn tool_run(args: &Value) -> Result<String> {
@@ -428,13 +579,12 @@ async fn tool_run(args: &Value) -> Result<String> {
     // Validate arguments before touching the environment, so a bad `mode` is
     // reported as such instead of being masked by a missing API key.
     let mode = RunMode::parse(args.get("mode").and_then(Value::as_str).unwrap_or("audit"))?;
-    let key = std::env::var("GROQ_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
+    let key = groq_key()
         .context(
             "GROQ_API_KEY is not set in this process's environment — \
              the run tool needs it to reach Groq. Set it in the MCP server's env.",
-        )?;
+        )?
+        .to_string();
 
     let model = args
         .get("model")
@@ -448,8 +598,7 @@ async fn tool_run(args: &Value) -> Result<String> {
         .unwrap_or(100_000);
     let max_steps = args.get("max_steps").and_then(Value::as_u64).unwrap_or(12);
     let max_secs = args.get("max_secs").and_then(Value::as_u64).unwrap_or(120);
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, false)?;
 
     let budget = Budget {
         max_tokens,
@@ -482,7 +631,22 @@ async fn tool_run(args: &Value) -> Result<String> {
         cwd: cwd.clone(),
         timeout: Duration::from_secs(30),
     });
-    let (tools, auditor) = build_guarded_tools(mode, base, Some(Arc::new(ledger.clone())), task.id);
+    // Same canonical chain as the CLI, and now with policy. Load policy from the
+    // MCP SERVER's own working directory (operator-controlled) — never from the
+    // run's `cwd` argument, which the caller/model controls and could point at an
+    // untrusted repo that ships a hostile kedge-policy.toml.
+    let policy_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = crate::guard::load_policy(None, &policy_dir)?;
+    let chain = crate::guard::build(
+        mode.as_guard_mode(),
+        policy,
+        None,
+        None, // built-in shell tool only; name classification suffices
+        base,
+        Some(Arc::new(ledger.clone())),
+        task.id,
+    );
+    let (tools, auditor) = (chain.tools, chain.auditor);
 
     let reasoner: Arc<dyn Reasoner> = Arc::new(ChatReasoner::new(
         GROQ_API_BASE.to_string(),
@@ -532,6 +696,31 @@ mod tests {
     use super::*;
     use kedge_core::{Observation, TaskId, ToolCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn confined_read_rejects_escapes_and_allows_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("ok.rs"), "fn a() {}").unwrap();
+        // A file inside the root resolves.
+        assert!(resolve_read_under(&root, "ok.rs").is_ok());
+        // Arbitrary-file-read (the H-A exfil primitive) is blocked:
+        assert!(resolve_read_under(&root, "/etc/passwd").is_err());
+        assert!(resolve_read_under(&root, "../escape.rs").is_err());
+        // A nonexistent path inside the root can't be canonicalized → error.
+        assert!(resolve_read_under(&root, "missing.rs").is_err());
+    }
+
+    #[test]
+    fn confined_write_allows_new_file_inside_but_not_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // A new (not-yet-existing) file whose parent is the root is allowed.
+        assert!(resolve_write_under(&root, "run.sqlite").is_ok());
+        // …but not one that escapes the root.
+        assert!(resolve_write_under(&root, "/tmp/evil.sqlite").is_err());
+        assert!(resolve_write_under(&root, "../evil.sqlite").is_err());
+    }
 
     /// Stands in for the real `ShellTool` and records whether it actually ran.
     struct SpyTool(Arc<AtomicUsize>);

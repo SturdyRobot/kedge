@@ -45,6 +45,38 @@ impl From<ExecError> for HarnessError {
 
 pub type Result<T> = std::result::Result<T, ExecError>;
 
+/// Environment variables always passed through from the parent: enough for build
+/// tools to find their toolchains, and never a place secrets live. Everything else
+/// is stripped by default so a model-driven `shell` tool can't read the harness's
+/// API keys (`$OPENAI_API_KEY`, `$GROQ_API_KEY`, …) straight out of its own
+/// environment. Extend per-command with [`CommandSpec::env`] or opt into full
+/// inheritance with [`CommandSpec::inherit_env`].
+const ENV_ALLOWLIST: &[&str] = &[
+    // shell / locale / temp — needed for programs to run at all
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "PWD",
+    // rust / cargo toolchain discovery
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "RUSTUP_TOOLCHAIN",
+    // go / node toolchain discovery
+    "GOPATH",
+    "GOROOT",
+    "GOCACHE",
+    "NODE_PATH",
+    "NVM_DIR",
+];
+
 /// A command to run under the isolated runner.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
@@ -53,6 +85,11 @@ pub struct CommandSpec {
     pub cwd: Option<PathBuf>,
     pub env: HashMap<String, String>,
     pub timeout: Duration,
+    /// When false (the default), the child gets a scrubbed environment: only
+    /// [`ENV_ALLOWLIST`] names are inherited, plus whatever `env` sets. When true,
+    /// the child inherits the parent's full environment (secrets included) — an
+    /// explicit, deliberate opt-in for trusted callers.
+    pub inherit_env: bool,
 }
 
 impl CommandSpec {
@@ -63,7 +100,15 @@ impl CommandSpec {
             cwd: None,
             env: HashMap::new(),
             timeout: Duration::from_secs(120),
+            inherit_env: false,
         }
+    }
+
+    /// Inherit the parent's full environment (secrets included). Off by default;
+    /// only set this for a trusted, non-model-driven command.
+    pub fn inherit_env(mut self, yes: bool) -> Self {
+        self.inherit_env = yes;
+        self
     }
 
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -120,10 +165,41 @@ fn kill_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
+/// Hard cap on captured output per stream. A runaway child (`cat /dev/zero`,
+/// `yes`) would otherwise grow this buffer without bound and OOM-kill the harness
+/// long before the wall-clock timeout fires. Once the cap is hit we stop reading;
+/// the child's next write blocks on the full pipe until the group is torn down.
+const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
 async fn drain(mut r: impl AsyncReadExt + Unpin) -> std::io::Result<String> {
     let mut buf = Vec::new();
-    r.read_to_end(&mut buf).await?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    let mut chunk = [0u8; 64 * 1024];
+    let mut truncated = false;
+    // Keep draining to EOF so the child never blocks on a full pipe (which would
+    // stall a large-but-legitimate command into a timeout), but only *retain* the
+    // first `MAX_CAPTURE_BYTES` — everything past the cap is read and discarded,
+    // so memory stays bounded against a runaway producer.
+    loop {
+        let n = r.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() < MAX_CAPTURE_BYTES {
+            let room = MAX_CAPTURE_BYTES - buf.len();
+            let take = n.min(room);
+            buf.extend_from_slice(&chunk[..take]);
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        s.push_str("\n[kedge: output truncated at 8 MiB]");
+    }
+    Ok(s)
 }
 
 /// Await an output-reader task with a hard upper bound. The caller has already
@@ -171,6 +247,18 @@ pub async fn run(spec: &CommandSpec) -> Result<ProcessOutput> {
     std_cmd.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
         std_cmd.current_dir(cwd);
+    }
+    // Scrub the environment by default: clear everything, then re-add only the
+    // allowlisted, non-secret, build-relevant vars from the parent. This is what
+    // stops a model-driven `shell` from exfiltrating the harness's API keys via
+    // `printenv` / `echo $OPENAI_API_KEY`. Trusted callers can opt out.
+    if !spec.inherit_env {
+        std_cmd.env_clear();
+        for name in ENV_ALLOWLIST {
+            if let Ok(val) = std::env::var(name) {
+                std_cmd.env(name, val);
+            }
+        }
     }
     for (k, v) in &spec.env {
         std_cmd.env(k, v);
@@ -511,6 +599,52 @@ mod tests {
             .unwrap();
         assert!(out.success());
         assert_eq!(out.stdout.trim(), "hello harness");
+    }
+
+    #[tokio::test]
+    async fn scrubs_secret_env_vars_from_the_child() {
+        // A secret in the harness's environment must NOT be visible to a
+        // model-driven shell command by default.
+        std::env::set_var("KEDGE_TEST_SECRET_XYZ", "leaked-key-value");
+        let out = run(&CommandSpec::new("sh").args(["-c", "echo v=$KEDGE_TEST_SECRET_XYZ"]))
+            .await
+            .unwrap();
+        assert!(out.success());
+        assert!(
+            !out.stdout.contains("leaked-key-value"),
+            "secret env var leaked to child: {:?}",
+            out.stdout
+        );
+        // PATH is allowlisted, so programs are still found and run.
+        assert!(out.stdout.contains("v="));
+
+        // …but an explicit opt-in inherits the full environment.
+        let out2 = run(&CommandSpec::new("sh")
+            .args(["-c", "echo v=$KEDGE_TEST_SECRET_XYZ"])
+            .inherit_env(true))
+        .await
+        .unwrap();
+        assert!(out2.stdout.contains("leaked-key-value"));
+        std::env::remove_var("KEDGE_TEST_SECRET_XYZ");
+    }
+
+    #[tokio::test]
+    async fn caps_runaway_output_without_hanging() {
+        // Emit ~20 MiB; the child completes cleanly (we keep draining), but only
+        // the first 8 MiB is retained and the truncation is flagged.
+        let out = run(&CommandSpec::new("sh")
+            .args(["-c", "head -c 20000000 /dev/zero | tr '\\0' a"])
+            .timeout(Duration::from_secs(30)))
+        .await
+        .unwrap();
+        assert!(!out.timed_out, "capped drain must not stall the child");
+        assert!(
+            out.stdout.len() <= MAX_CAPTURE_BYTES + 64,
+            "retained {} bytes, cap is {}",
+            out.stdout.len(),
+            MAX_CAPTURE_BYTES
+        );
+        assert!(out.stdout.contains("truncated"));
     }
 
     #[tokio::test]

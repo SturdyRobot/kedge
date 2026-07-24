@@ -30,6 +30,10 @@ pub enum EvalError {
     NoRuns(PathBuf),
     #[error("malformed task id in ledger")]
     BadTaskId,
+    #[error("suite `baseline_ledger` path `{0}` escapes the suite directory")]
+    UnsafeBaselinePath(PathBuf),
+    #[error("suite defines no metrics — an empty metric set would vacuously pass")]
+    NoMetrics,
 }
 
 // ── suite schema ──
@@ -241,7 +245,9 @@ pub fn evaluate(suite: &EvalSuite, baseline: &RunProfile, candidate: &RunProfile
         .collect();
     EvalReport {
         suite_name: suite.suite_name.clone(),
-        passed: results.iter().all(|r| r.passed),
+        // A suite with zero metrics must NOT report a vacuous pass (`all()` over an
+        // empty set is `true`) — that would mask every regression with exit 0.
+        passed: !results.is_empty() && results.iter().all(|r| r.passed),
         results,
     }
 }
@@ -330,6 +336,21 @@ impl std::str::FromStr for OutputFormat {
     }
 }
 
+/// Resolve a suite's `baseline_ledger` under the suite file's directory, rejecting
+/// absolute paths and `..`/symlink escapes. The ledger must exist.
+fn confine_baseline(suite_dir: &Path, baseline: &Path) -> Result<PathBuf, EvalError> {
+    if baseline.is_absolute() {
+        return Err(EvalError::UnsafeBaselinePath(baseline.to_path_buf()));
+    }
+    let target = suite_dir.join(baseline);
+    let canon = std::fs::canonicalize(&target)?;
+    let canon_dir = std::fs::canonicalize(suite_dir)?;
+    if !canon.starts_with(&canon_dir) {
+        return Err(EvalError::UnsafeBaselinePath(baseline.to_path_buf()));
+    }
+    Ok(canon)
+}
+
 /// The `kedge eval` entry point: load the suite + baseline, compare against the
 /// candidate ledger, print the rendered report, and return the CI exit code.
 pub fn run_eval(
@@ -338,7 +359,18 @@ pub fn run_eval(
     format: OutputFormat,
 ) -> Result<i32, EvalError> {
     let suite = EvalSuite::from_json_file(&suite_path)?;
-    let baseline = RunProfile::load_first(&suite.baseline_ledger)?;
+    if suite.metrics.is_empty() {
+        return Err(EvalError::NoMetrics);
+    }
+    // Confine `baseline_ledger` to the suite file's own directory — a suite from an
+    // untrusted source must not point it at an arbitrary file elsewhere on disk.
+    let suite_dir = suite_path
+        .as_ref()
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let baseline_path = confine_baseline(suite_dir, &suite.baseline_ledger)?;
+    let baseline = RunProfile::load_first(&baseline_path)?;
     let candidate = RunProfile::load_first(&candidate_ledger)?;
     let report = evaluate(&suite, &baseline, &candidate);
     let rendered = match format {
@@ -372,6 +404,33 @@ mod tests {
             total_tokens: tokens,
             final_answer: answer.into(),
         }
+    }
+
+    #[test]
+    fn empty_metrics_do_not_vacuously_pass() {
+        // No metrics → the report must NOT pass (exit 0 would mask regressions).
+        let report = evaluate(
+            &suite(vec![]),
+            &profile(1, &["a"], 10, "x"),
+            &profile(1, &["a"], 10, "x"),
+        );
+        assert!(!report.passed, "an empty metric set must not report a pass");
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn baseline_path_is_confined_to_the_suite_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("base.sqlite"), b"x").unwrap();
+        // A relative path inside the suite dir resolves.
+        assert!(confine_baseline(&root, Path::new("base.sqlite")).is_ok());
+        // Absolute and traversal paths are rejected.
+        assert!(matches!(
+            confine_baseline(&root, Path::new("/etc/passwd")),
+            Err(EvalError::UnsafeBaselinePath(_))
+        ));
+        assert!(confine_baseline(&root, Path::new("../outside.sqlite")).is_err());
     }
 
     #[test]

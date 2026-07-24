@@ -1,24 +1,32 @@
 # Kedge
 
-[![CI](https://github.com/SturdyRobot/kedge/actions/workflows/ci.yml/badge.svg)](https://github.com/SturdyRobot/kedge/actions/workflows/ci.yml)
+[![CI](https://github.com/nlj3/kedge/actions/workflows/ci.yml/badge.svg)](https://github.com/nlj3/kedge/actions/workflows/ci.yml)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-orange.svg)](LICENSE)
-[![Try it live](https://img.shields.io/badge/demo-run%20it%20in%20your%20browser-5ac8fa)](https://sturdyrobot.io)
+[![Try it live](https://img.shields.io/badge/demo-run%20it%20in%20your%20browser-5ac8fa)](https://nlj.dev)
 
-> **Run the engine in your browser** → **[sturdyrobot.io](https://sturdyrobot.io)** (open the Kedge icon)
+> **Run the engine in your browser** → **[nlj.dev](https://nlj.dev)** (open the Kedge icon)
 > The real ReAct engine compiled to WebAssembly — deterministic Think → Act → Observe,
 > executing entirely client-side. No server, no API key, no network.
 
-A deterministic AI-agent execution and verification harness, written in Rust.
+A **deterministic, dry-run-first execution substrate for AI agents**, written in Rust.
 
-Kedge sits between an LLM (frontier API or local Ollama) and a real
-codebase. It drives a **ReAct** agent loop under **hard, enforceable budgets**,
-manages the context window with **AST-aware compaction**, runs tools over the
-**Model Context Protocol**, executes verification in **isolated subprocesses**,
-and journals every step to **SQLite** for deterministic replay.
+Kedge sits between an LLM (a frontier API or local Ollama) and a real system, and
+gives you the two things that make an autonomous agent trustworthy:
 
-The design goal is *control*: an agent should never run away — not on tokens,
-not on steps, not on wall-clock, and not on a build that forks a runaway child
-process. Every one of those is a hard ceiling here.
+- **Preview, before.** In `--audit` mode, every *mutating* tool call the agent
+  makes is **intercepted and journaled instead of executed** — so you see exactly
+  what the agent *would* do to your files, APIs, and data before anything happens.
+  Read-only tools still run, so the agent reasons on real data.
+- **Audit & replay, after.** Every step is journaled to a **replayable SQLite
+  ledger**, so you can reconstruct and re-run exactly what happened.
+
+All of it runs under **hard, enforceable budgets** (tokens, steps, wall-clock) in
+**one memory-safe static binary** — no Python runtime, no GC pauses, no GIL.
+
+The design goal is *control and accountability*: preview before, audit after, and
+never run away. **Kedge is policy, not a sandbox** — it keeps an agent's chosen
+actions inside the bounds you set; for hard OS-level containment, run it inside a
+container or VM. See [SECURITY.md](SECURITY.md) for the exact threat model.
 
 ```
 $ kedge run "assess the toolchain"
@@ -41,43 +49,54 @@ $ kedge run "assess the toolchain"
 
 (That's the offline demo policy. Add `--model` to drive a real LLM — see below.)
 
-## Capabilities
+## What it does
 
-Kedge is a small workspace of composable crates, each a clean trait implementation:
+The two features that carry the product — the **trust arc**:
 
-- **Deterministic ReAct core** — hard token/step/wall-clock budgets, a validated
-  state machine, and byte-for-byte replay from an append-only SQLite journal.
-- **Shadow-Guard audit mode** (`kedge run --audit`) — a **zero-risk dry-run**: read
-  tools execute for real so the agent reasons on real data, but every *mutating*
-  tool is intercepted (nothing is written/called) and journaled. `kedge audit`
-  then prints a security scorecard + a measured token/cost report.
-- **Human-in-the-loop** (`kedge run --hitl`) — the same interception boundary, but
-  it *pauses* on each mutating tool and asks a human to approve (`y/N`) before it
-  runs; every decision is journaled. Three modes, one boundary: dry-run / approve /
-  block (`kedge-policy`).
+- **Shadow-Guard — preview mutations before they happen** (`kedge run --audit`, the
+  default). Read-only tools execute for real so the agent reasons on real data, but
+  every tool classified as *mutating* is **intercepted and journaled instead of
+  run** — nothing is written, sent, or called. You get the agent's intended side
+  effects before you ever let it act; `kedge audit` then prints a security scorecard
+  + a measured token/cost report. *(Classification is fail-safe: anything not
+  clearly read-only is treated as mutating.)*
+- **Deterministic replay ledger** — every step is journaled to an append-only
+  SQLite ledger; `kedge replay <id>` reconstructs the exact trajectory, so a run is
+  re-runnable and auditable after the fact.
+
+Enforced around them:
+
+- **Hard budgets** — token, step, and wall-clock ceilings, checked *before* work
+  happens; an agent physically can't run away.
+- **Three guard modes, one boundary** — dry-run (`--audit`), human-approve
+  (`--hitl`: journaled `y/N`, or remote via a webhook + the HTTP API), or block
+  outright (`--deny` / `kedge-policy` blocked tools + PII redaction). **Safe by
+  default:** `kedge run` shadow-audits unless you opt into `--live`.
 - **Crash recovery** (`kedge resume`) — continue an interrupted run from its last
-  journaled step without re-executing already-performed (side-effecting) actions.
+  journaled step, through the same guard chain, without re-executing already-
+  performed actions.
+- **MCP client + server** (`kedge-mcp`) — consume external tools over JSON-RPC 2.0
+  (stdio + streamable HTTP), and expose Kedge's own tools to any MCP host.
 - **Bounded subagent mesh** (`kedge-mesh`) — spawn subagents in isolated Tokio
-  tasks under hard budgets; a panic/timeout/runaway is contained, never touching
-  the parent.
-- **MCP client** (`kedge-mcp`) — native async JSON-RPC 2.0 over **stdio and
-  streamable HTTP**; auto-discovers and routes external tools.
-- **Regression harness** (`kedge eval`) — compare a run against a baseline ledger
-  (step/tool/token/drift metrics) with JUnit output and CI exit codes.
-- **AST-aware compaction** + a safe **content-hashed cache** (`kedge-cache`) — keep
-  code skeletons within a token budget; never re-parse an unchanged file.
-- **Guardrails** — user-space policy (`kedge-policy`: blocked tools, PII redaction,
-  budgets) and kernel-boundary supervision (`kedge-probe`: eBPF LSM, Linux).
-- **OpenTelemetry** (`--features otel`) — export execution spans to
-  Jaeger/Datadog/Honeycomb; off by default, zero cost otherwise.
-- **Python bindings** (`kedge-bridge` → `pip install kedge-rt`) — call the AST
-  compactor, tool classifier, policy matcher, and forensic audit from Python. A
-  `maturin`-built abi3 wheel; a separate, workspace-excluded crate.
-- **HTTP control API** (`kedge serve`, `kedge-server`/axum) — inspect runs
-  (`GET /runs`, `/runs/{id}`) and **resolve HITL approvals remotely**
-  (`GET /approvals`, `POST /approvals/{id}`), so a dashboard/Slack/web UI can drive
-  Kedge instead of a terminal. Pairs with `kedge-hitl`'s `WebhookApprover` — HITL
-  approvals come from a webhook + this API, not just stdin `y/N`.
+  tasks under hard budgets; a panic/timeout is contained, never touching the parent.
+- **HTTP control API** (`kedge serve`) — inspect runs and resolve HITL approvals
+  remotely (bearer-token auth required off loopback), so a dashboard/Slack/web UI
+  can drive Kedge instead of a terminal.
+
+Bundled utilities (handy, not the headline — dedicated tools go deeper in each lane):
+
+- **AST-aware compaction** (`kedge compact`) + a content-hashed cache — shrink a
+  source file to a signatures-only skeleton to fit a token budget, and `kedge
+  expand` a specific body back on demand.
+- **Verification loop** (`kedge verify` / `kedge-exec`) — run cargo/go/npm/pytest in
+  an isolated subprocess (clean process-group teardown) and parse compiler
+  diagnostics into a structured pass/fail the agent can react to.
+- **Regression gate** (`kedge eval`) — diff a run against a baseline ledger
+  (step/tool/token/drift metrics), emit JUnit + a CI exit code; local and
+  deterministic, no LLM-judge spend.
+- **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge` →
+  `pip install kedge-rt`), and an **experimental, observe-only eBPF/LSM prototype**
+  (`kedge-probe`, Linux — it logs, it does *not* enforce; see the crate docs).
 
 ## Install
 
@@ -89,13 +108,13 @@ runtime.
 Install the `kedge` binary straight from GitHub:
 
 ```sh
-cargo install --git https://github.com/SturdyRobot/kedge
+cargo install --git https://github.com/nlj3/kedge
 ```
 
 Or clone and build from source:
 
 ```sh
-git clone https://github.com/SturdyRobot/kedge
+git clone https://github.com/nlj3/kedge
 cd kedge
 cargo install --path .        # installs `kedge` into ~/.cargo/bin
 # or just: cargo build --release   → target/release/kedge
@@ -143,14 +162,14 @@ flowchart TD
 | **kedge-compact** | Tree-sitter token compactor for **Rust, Python, JS, TS, Go**. Keeps code *skeletons* (signatures, doc comments) and elides function bodies to fit a context budget. |
 | **kedge-mcp** | A native async **JSON-RPC 2.0** client for MCP over newline-delimited stdio, with concurrent request de-multiplexing. Speaks `initialize` / `tools/list` / `tools/call`. |
 | **kedge-exec** | Tokio subprocess runner. Each child leads its own **process group**, so a timeout reaps the whole subtree (`killpg`). Auto-detects and runs the project's verifier (**cargo/go/npm/pytest**) with a cargo **diagnostic interceptor**. |
-| **kedge-ledger** | Append-only **SQLite** journal. Records each step live via the engine's observer hook and reconstructs any run byte-for-byte (`replay`). |
+| **kedge-ledger** | Append-only **SQLite** journal. Records each step live via the engine's observer hook and reconstructs a run's trajectory (`replay`). |
 | **kedge-llm** | A `Reasoner` over any **OpenAI-compatible** chat endpoint (OpenAI/Ollama/vLLM/LM Studio) that emits ReAct JSON parsed straight into the engine's `Action` type. |
 | **kedge-mesh** | Bounded subagent supervision — spawn children in isolated Tokio tasks under hard token/step/wall-clock bounds; panics/timeouts/runaways are contained and journaled, never touching the parent. |
 | **kedge-eval** | Event-sourced regression harness — profiles baseline vs candidate ledgers (step/tool/token/drift metrics), emits JUnit XML + CI exit codes. |
 | **kedge-cache** | Content-hashed (`sha256`) cache of deterministic AST compaction — never LLM responses. Unchanged file → cached skeleton, no re-parse. |
 | **kedge-policy** | Lightweight user-space guardrails from `kedge-policy.toml` (blocked tools, PII redaction, per-run budgets) — a native matcher, not OPA/Rego. |
 | **kedge-audit** | Shadow-Guard dry-run interceptor + forensic report (intercepted mutations, measured token/cost). |
-| **kedge-probe** | Kernel-boundary supervision via eBPF LSM (Linux); portable no-op fallback elsewhere. The eBPF object is a separate, workspace-excluded crate. |
+| **kedge-probe** | **Experimental, observe-only** eBPF/LSM prototype (Linux) — it logs, it does *not* enforce, and it isn't wired into a normal run; portable no-op fallback elsewhere. The eBPF object is a separate, workspace-excluded crate. |
 | **kedge** (bin) | `clap` CLI wiring it all together. |
 
 ### The ReAct engine

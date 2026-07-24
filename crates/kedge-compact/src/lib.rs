@@ -197,7 +197,7 @@ impl Compactor {
             .parse(source, None)
             .ok_or(CompactError::ParseFailed)?;
         let mut edits: Vec<(usize, usize, String)> = Vec::new();
-        collect_body_elisions(tree.root_node(), source, self.language, &mut edits);
+        collect_body_elisions(tree.root_node(), source, self.language, &mut edits, 0);
         edits.sort_by_key(|e| e.0);
 
         let mut out = String::with_capacity(source.len());
@@ -244,6 +244,83 @@ impl Compactor {
         }
         self.outline(source)
     }
+
+    /// The inverse of compaction: return the full source of every function or
+    /// method named `symbol`, bodies included.
+    ///
+    /// This is what makes compaction safe to *act* on. A caller orients on a
+    /// skeleton (bodies elided, signatures kept), then — when it needs to edit
+    /// one specific function whose body it never saw — fetches just that body on
+    /// demand instead of re-reading the whole file. The skeleton already shows
+    /// the name above each `/* … elided */`, so the caller always knows what to
+    /// ask for.
+    ///
+    /// Names are not unique (several `new` methods, an overridden `render`), so
+    /// every match is returned in source order. An empty result means no such
+    /// named function exists — the caller should fall back to reading the file.
+    #[tracing::instrument(
+        name = "compact.expand",
+        skip_all,
+        fields(language = ?self.language, symbol = %symbol, matches = tracing::field::Empty)
+    )]
+    pub fn expand(&mut self, source: &str, symbol: &str) -> Result<Vec<String>> {
+        let tree = self
+            .parser
+            .parse(source, None)
+            .ok_or(CompactError::ParseFailed)?;
+        let mut hits = Vec::new();
+        collect_named(
+            tree.root_node(),
+            source,
+            self.language,
+            symbol,
+            &mut hits,
+            0,
+        );
+        tracing::Span::current().record("matches", hits.len() as u64);
+        Ok(hits)
+    }
+}
+
+/// Cap on AST recursion depth. Native stacks handle far more, but a pathologically
+/// nested source (thousands of nested blocks) could otherwise overflow the stack —
+/// and a Rust stack overflow aborts the process, uncatchable. Real code never
+/// nests this deep; beyond the cap we simply stop descending (a few function
+/// bodies that deep may go un-elided — a cosmetic loss, never a crash).
+const MAX_AST_DEPTH: u32 = 400;
+
+/// Walk the tree collecting the full text of every function-kind node whose
+/// `name` field equals `symbol`. Mirrors [`collect_body_elisions`] but keeps the
+/// body instead of eliding it, and does not recurse into a matched function.
+fn collect_named(
+    node: Node,
+    source: &str,
+    lang: Language,
+    symbol: &str,
+    out: &mut Vec<String>,
+    depth: u32,
+) {
+    if depth > MAX_AST_DEPTH {
+        return;
+    }
+    let kinds = lang.function_kinds();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            let name = child
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok());
+            if name == Some(symbol) {
+                if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                    out.push(text.to_string());
+                }
+            }
+            // A match's body is what we want; a non-match function can't contain
+            // a top-level-named target either — in both cases, don't recurse.
+        } else {
+            collect_named(child, source, lang, symbol, out, depth + 1);
+        }
+    }
 }
 
 /// Walk the tree collecting `(start, end, replacement)` for each function body,
@@ -253,7 +330,11 @@ fn collect_body_elisions(
     source: &str,
     lang: Language,
     edits: &mut Vec<(usize, usize, String)>,
+    depth: u32,
 ) {
+    if depth > MAX_AST_DEPTH {
+        return;
+    }
     let kinds = lang.function_kinds();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -270,7 +351,7 @@ fn collect_body_elisions(
             // Do not recurse into the function; its body is gone.
         } else {
             // Descend into impls, classes, modules, etc. to reach nested functions.
-            collect_body_elisions(child, source, lang, edits);
+            collect_body_elisions(child, source, lang, edits, depth + 1);
         }
     }
 }
@@ -378,5 +459,50 @@ pub fn top_level(a: i32, b: i32) -> i32 {
         let r = c.outline(tiny).unwrap();
         assert!(r.compacted_tokens <= r.original_tokens);
         assert_eq!(r.elided_bodies, 0);
+    }
+
+    // ── expand: the inverse of compaction (JIT decompaction) ──
+
+    #[test]
+    fn expand_returns_the_full_body_a_skeleton_elided() {
+        let mut c = Compactor::rust().unwrap();
+        // The skeleton would show `pub fn new(...)` with the body elided; expand
+        // brings back exactly the code you'd need to edit it.
+        let hits = c.expand(RUST, "new").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("compute_expensive_thing(id)"));
+        assert!(hits[0].contains("pub fn new"));
+    }
+
+    #[test]
+    fn expand_finds_top_level_functions_too() {
+        let mut c = Compactor::rust().unwrap();
+        let hits = c.expand(RUST, "top_level").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("acc += i * i"));
+    }
+
+    #[test]
+    fn expand_returns_every_match_since_names_are_not_unique() {
+        let mut c = Compactor::rust().unwrap();
+        let src = "impl A { fn make() -> u8 { 1 } }\nimpl B { fn make() -> u8 { 2 } }\n";
+        let hits = c.expand(src, "make").unwrap();
+        assert_eq!(hits.len(), 2, "both `make` methods should come back");
+    }
+
+    #[test]
+    fn expand_of_an_unknown_symbol_is_empty_not_an_error() {
+        let mut c = Compactor::rust().unwrap();
+        assert!(c.expand(RUST, "does_not_exist").unwrap().is_empty());
+    }
+
+    #[test]
+    fn expand_works_across_languages() {
+        let mut py = Compactor::new(Language::Python).unwrap();
+        let hits = py
+            .expand("def greet(name):\n    return f'hi {name}'\n", "greet")
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("return f'hi {name}'"));
     }
 }

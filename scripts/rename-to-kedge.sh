@@ -10,7 +10,7 @@
 #   3. rust module paths  aegis_x, sturdy_x  -> kedge_x        (use statements)
 #   4. env var            KEDGE_LEDGER_PATH  -> KEDGE_LEDGER_PATH
 #   5. ledger filename    kedge.sqlite       -> kedge.sqlite
-#   6. repo URLs          SturdyRobot/kedge  -> SturdyRobot/kedge
+#   6. repo URLs          nlj3/kedge  -> nlj3/kedge
 #   7. prose              Kedge -> Kedge, kedge -> kedge
 #
 # MCP tool names (kedge_compact/kedge_audit/kedge_run) are a published API
@@ -83,7 +83,7 @@ subst 's/kedge\.sqlite/kedge.sqlite/g' 'kedge\.sqlite' 'ledger filename'
 subst 's|\.kedge/ledger\.sqlite|.kedge/ledger.sqlite|g' '\.kedge/ledger' 'central ledger path'
 
 # ── 6. repo URLs (before generic prose, which would mangle them) ────────────
-subst 's|SturdyRobot/kedge|SturdyRobot/kedge|g' 'SturdyRobot/kedge' 'repo URLs'
+subst 's|nlj3/kedge|nlj3/kedge|g' 'nlj3/kedge' 'repo URLs'
 
 # ── 7. prose + the binary name ──────────────────────────────────────────────
 subst 's/\bAegis\b/Kedge/g' '\bAegis\b' 'prose (Kedge -> Kedge)'
