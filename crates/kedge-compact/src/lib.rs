@@ -269,7 +269,14 @@ impl Compactor {
             .parse(source, None)
             .ok_or(CompactError::ParseFailed)?;
         let mut hits = Vec::new();
-        collect_named(tree.root_node(), source, self.language, symbol, &mut hits, 0);
+        collect_named(
+            tree.root_node(),
+            source,
+            self.language,
+            symbol,
+            &mut hits,
+            0,
+        );
         tracing::Span::current().record("matches", hits.len() as u64);
         Ok(hits)
     }

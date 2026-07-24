@@ -409,7 +409,11 @@ mod tests {
     #[test]
     fn empty_metrics_do_not_vacuously_pass() {
         // No metrics → the report must NOT pass (exit 0 would mask regressions).
-        let report = evaluate(&suite(vec![]), &profile(1, &["a"], 10, "x"), &profile(1, &["a"], 10, "x"));
+        let report = evaluate(
+            &suite(vec![]),
+            &profile(1, &["a"], 10, "x"),
+            &profile(1, &["a"], 10, "x"),
+        );
         assert!(!report.passed, "an empty metric set must not report a pass");
         assert_eq!(report.exit_code(), 1);
     }

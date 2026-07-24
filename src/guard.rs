@@ -52,6 +52,13 @@ pub struct GuardChain {
     pub gate: Option<Arc<ApprovalGate>>,
 }
 
+/// The mode guard's output: the wrapped executor plus optional reporting handles.
+type ModeChain = (
+    Arc<dyn ToolExecutor>,
+    Option<Arc<kedge_audit::AuditExecutor>>,
+    Option<Arc<ApprovalGate>>,
+);
+
 /// Build the canonical chain. `approver` is only consulted in [`GuardMode::Hitl`];
 /// if it is `None` there, the chain fails **safe** by denying every mutating tool.
 pub fn build(
@@ -64,11 +71,7 @@ pub fn build(
     run_id: TaskId,
 ) -> GuardChain {
     // ── inner: the mode guard ──
-    let (mode_tools, auditor, gate): (
-        Arc<dyn ToolExecutor>,
-        Option<Arc<kedge_audit::AuditExecutor>>,
-        Option<Arc<ApprovalGate>>,
-    ) = match mode {
+    let (mode_tools, auditor, gate): ModeChain = match mode {
         GuardMode::Live => (base, None, None),
         GuardMode::Deny => {
             let g = Arc::new(
@@ -152,7 +155,15 @@ mod tests {
     #[tokio::test]
     async fn audit_default_intercepts_mutations() {
         let (base, hits) = spy();
-        let chain = build(GuardMode::Audit, None, None, None, base, None, TaskId::new());
+        let chain = build(
+            GuardMode::Audit,
+            None,
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+        );
         let obs = chain
             .tools
             .execute(&ToolCall::new("delete_file", serde_json::json!({})))
@@ -168,10 +179,16 @@ mod tests {
         // A blocked tool is refused by the outer PolicyGuard before the (unguarded)
         // live mode inner ever sees it.
         let (base, hits) = spy();
-        let policy = Arc::new(
-            Policy::from_toml_str(r#"blocked_tools = ["shell"]"#).unwrap(),
+        let policy = Arc::new(Policy::from_toml_str(r#"blocked_tools = ["shell"]"#).unwrap());
+        let chain = build(
+            GuardMode::Live,
+            Some(policy),
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
         );
-        let chain = build(GuardMode::Live, Some(policy), None, None, base, None, TaskId::new());
         let obs = chain
             .tools
             .execute(&ToolCall::new("shell", serde_json::json!({})))

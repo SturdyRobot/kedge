@@ -75,19 +75,85 @@ const READ_VERBS: &[&str] = &[
 
 /// Explicitly dangerous verbs — destructive, privileged, or externally-visible.
 const HIGH_RISK_VERBS: &[&str] = &[
-    "exec", "execute", "shell", "run", "eval", "spawn", "delete", "rm", "drop", "kill", "destroy",
-    "remove", "wipe", "erase", "purge", "unlink", "sudo", "chmod", "chown", "format", "truncate",
-    "overwrite", "deploy", "publish", "release", "send", "post", "email", "charge", "transfer",
-    "pay", "revoke", "shutdown", "reboot", "restart",
+    "exec",
+    "execute",
+    "shell",
+    "run",
+    "eval",
+    "spawn",
+    "delete",
+    "rm",
+    "drop",
+    "kill",
+    "destroy",
+    "remove",
+    "wipe",
+    "erase",
+    "purge",
+    "unlink",
+    "sudo",
+    "chmod",
+    "chown",
+    "format",
+    "truncate",
+    "overwrite",
+    "deploy",
+    "publish",
+    "release",
+    "send",
+    "post",
+    "email",
+    "charge",
+    "transfer",
+    "pay",
+    "revoke",
+    "shutdown",
+    "reboot",
+    "restart",
 ];
 
 /// Clearly side-effecting but non-destructive verbs — still mutating, so still
 /// intercepted in audit mode, just a lower risk label.
 const MUTATING_VERBS: &[&str] = &[
-    "write", "create", "update", "set", "modify", "insert", "append", "save", "edit", "patch",
-    "rename", "move", "mv", "copy", "cp", "upload", "install", "commit", "push", "merge", "grant",
-    "enable", "disable", "start", "stop", "register", "unregister", "subscribe", "unsubscribe",
-    "mkdir", "put", "add", "replace", "apply", "sync", "provision", "invoke", "trigger", "submit",
+    "write",
+    "create",
+    "update",
+    "set",
+    "modify",
+    "insert",
+    "append",
+    "save",
+    "edit",
+    "patch",
+    "rename",
+    "move",
+    "mv",
+    "copy",
+    "cp",
+    "upload",
+    "install",
+    "commit",
+    "push",
+    "merge",
+    "grant",
+    "enable",
+    "disable",
+    "start",
+    "stop",
+    "register",
+    "unregister",
+    "subscribe",
+    "unsubscribe",
+    "mkdir",
+    "put",
+    "add",
+    "replace",
+    "apply",
+    "sync",
+    "provision",
+    "invoke",
+    "trigger",
+    "submit",
 ];
 
 /// Classify a tool by its name. **Fail-safe and deny-wins:** anything not
@@ -200,8 +266,8 @@ mod tests {
             "search_and_destroy",
             "read_and_remove",
             "fetch_and_post",
-            "get_or_create",   // classic MCP pattern
-            "status_update",   // read verb head, but it UPDATES
+            "get_or_create", // classic MCP pattern
+            "status_update", // read verb head, but it UPDATES
             "read_write",
             "find_and_replace",
             "search_and_replace",
@@ -233,7 +299,10 @@ mod tests {
             "read_only_hint=false must upgrade a read-looking name"
         );
         // No hints → identical to plain name classification.
-        assert_eq!(classify_annotated("read_file", None, None), classify("read_file"));
+        assert_eq!(
+            classify_annotated("read_file", None, None),
+            classify("read_file")
+        );
         // A truthful read-only hint on a read-only name leaves it read-only.
         assert_eq!(
             classify_annotated("get_status", Some(true), None),

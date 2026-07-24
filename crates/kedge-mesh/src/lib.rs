@@ -218,11 +218,10 @@ async fn supervise(
             config.name, config.depth, MAX_SUBAGENT_DEPTH
         );
         tracing::warn!(subagent = %config.name, depth = config.depth, "subagent depth limit hit");
-        let _ = ev_tx
-            .try_send(SubagentEvent::Failed {
-                reason: reason.clone(),
-                tokens: 0,
-            });
+        let _ = ev_tx.try_send(SubagentEvent::Failed {
+            reason: reason.clone(),
+            tokens: 0,
+        });
         return SubagentResult::Error {
             reason,
             tokens_used: 0,

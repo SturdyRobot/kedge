@@ -53,12 +53,28 @@ pub type Result<T> = std::result::Result<T, ExecError>;
 /// inheritance with [`CommandSpec::inherit_env`].
 const ENV_ALLOWLIST: &[&str] = &[
     // shell / locale / temp — needed for programs to run at all
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-    "TZ", "PWD",
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "PWD",
     // rust / cargo toolchain discovery
-    "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "RUSTUP_TOOLCHAIN",
     // go / node toolchain discovery
-    "GOPATH", "GOROOT", "GOCACHE", "NODE_PATH", "NVM_DIR",
+    "GOPATH",
+    "GOROOT",
+    "GOCACHE",
+    "NODE_PATH",
+    "NVM_DIR",
 ];
 
 /// A command to run under the isolated runner.
