@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -41,6 +41,25 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025
 const GROQ_API_BASE: &str = "https://api.groq.com/openai/v1";
 const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
 
+/// The Groq key, read from the environment **once** at startup and then removed
+/// from our own process environment. The agent's `shell` tool already gets an
+/// allowlist-scrubbed env, but that alone doesn't stop a child from reading the
+/// *parent's* environment via `/proc/<ppid>/environ`; removing the key here closes
+/// that path. Cached because the MCP server is long-lived and serves many runs.
+static GROQ_KEY: OnceLock<Option<String>> = OnceLock::new();
+
+fn groq_key() -> Option<&'static str> {
+    GROQ_KEY
+        .get_or_init(|| {
+            let k = std::env::var("GROQ_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty());
+            std::env::remove_var("GROQ_API_KEY");
+            k
+        })
+        .as_deref()
+}
+
 /// Negotiate the protocol revision: echo the client's only if we speak it.
 fn negotiate_version(requested: Option<&str>) -> &'static str {
     match requested {
@@ -64,6 +83,9 @@ type SharedOut = Arc<tokio::sync::Mutex<Stdout>>;
 /// `kedge_compact`. JSON-RPC correlates by `id`, so out-of-order replies are
 /// expected and fine.
 pub async fn serve_stdio() -> Result<()> {
+    // Read + scrub the Groq key from our own env immediately, before any run can
+    // spawn a shell child that might read it back out of `/proc/self/environ`.
+    let _ = groq_key();
     let mut reader = BufReader::new(tokio::io::stdin()).lines();
     let out: SharedOut = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     // The MCP handshake must precede any tool traffic.
@@ -437,6 +459,20 @@ impl RunMode {
 ///
 /// `CliApprover` is deliberately never used here: it prints to stdout and reads
 /// stdin, which are this process's JSON-RPC channel.
+impl RunMode {
+    fn as_guard_mode(self) -> crate::guard::GuardMode {
+        match self {
+            RunMode::Audit => crate::guard::GuardMode::Audit,
+            RunMode::Deny => crate::guard::GuardMode::Deny,
+            RunMode::Live => crate::guard::GuardMode::Live,
+        }
+    }
+}
+
+/// Thin wrapper over the canonical [`crate::guard::build`] (no policy here — the
+/// MCP path loads policy at the call site). Kept so the mode-behavior tests read
+/// against the same chain the real run uses.
+#[cfg(test)]
 fn build_guarded_tools(
     mode: RunMode,
     base: Arc<dyn ToolExecutor>,
@@ -446,22 +482,8 @@ fn build_guarded_tools(
     Arc<dyn ToolExecutor>,
     Option<Arc<kedge_audit::AuditExecutor>>,
 ) {
-    match mode {
-        RunMode::Live => (base, None),
-        RunMode::Deny => (
-            Arc::new(kedge_hitl::ApprovalGate::new(
-                base,
-                Arc::new(kedge_hitl::DenyingApprover),
-                ledger,
-                run_id,
-            )),
-            None,
-        ),
-        RunMode::Audit => {
-            let ae = Arc::new(kedge_audit::AuditExecutor::new(base, ledger, run_id));
-            (ae.clone() as Arc<dyn ToolExecutor>, Some(ae))
-        }
-    }
+    let chain = crate::guard::build(mode.as_guard_mode(), None, None, None, base, ledger, run_id);
+    (chain.tools, chain.auditor)
 }
 
 async fn tool_run(args: &Value) -> Result<String> {
@@ -472,13 +494,12 @@ async fn tool_run(args: &Value) -> Result<String> {
     // Validate arguments before touching the environment, so a bad `mode` is
     // reported as such instead of being masked by a missing API key.
     let mode = RunMode::parse(args.get("mode").and_then(Value::as_str).unwrap_or("audit"))?;
-    let key = std::env::var("GROQ_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
+    let key = groq_key()
         .context(
             "GROQ_API_KEY is not set in this process's environment — \
              the run tool needs it to reach Groq. Set it in the MCP server's env.",
-        )?;
+        )?
+        .to_string();
 
     let model = args
         .get("model")
@@ -526,7 +547,22 @@ async fn tool_run(args: &Value) -> Result<String> {
         cwd: cwd.clone(),
         timeout: Duration::from_secs(30),
     });
-    let (tools, auditor) = build_guarded_tools(mode, base, Some(Arc::new(ledger.clone())), task.id);
+    // Same canonical chain as the CLI, and now with policy. Load policy from the
+    // MCP SERVER's own working directory (operator-controlled) — never from the
+    // run's `cwd` argument, which the caller/model controls and could point at an
+    // untrusted repo that ships a hostile kedge-policy.toml.
+    let policy_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = crate::guard::load_policy(None, &policy_dir)?;
+    let chain = crate::guard::build(
+        mode.as_guard_mode(),
+        policy,
+        None,
+        None, // built-in shell tool only; name classification suffices
+        base,
+        Some(Arc::new(ledger.clone())),
+        task.id,
+    );
+    let (tools, auditor) = (chain.tools, chain.auditor);
 
     let reasoner: Arc<dyn Reasoner> = Arc::new(ChatReasoner::new(
         GROQ_API_BASE.to_string(),

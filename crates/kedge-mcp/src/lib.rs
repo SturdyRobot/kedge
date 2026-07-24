@@ -485,6 +485,20 @@ pub struct McpTool {
     pub description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Value,
+    /// Behavioral hints from the MCP spec's tool `annotations`. Treated as
+    /// **untrusted** — used only to make a tool's safety classification *more*
+    /// restrictive, never less (see `kedge_core::classify_annotated`).
+    #[serde(default)]
+    pub annotations: ToolAnnotations,
+}
+
+/// The subset of MCP tool `annotations` that affects safety classification.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolAnnotations {
+    #[serde(default, rename = "readOnlyHint")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, rename = "destructiveHint")]
+    pub destructive_hint: Option<bool>,
 }
 
 /// The distilled result of a `tools/call`.

@@ -15,7 +15,7 @@ pub use budget::{Budget, BudgetTracker};
 pub use error::{BudgetKind, HarnessError, Result};
 pub use model::{Action, Observation, Outcome, Step, Task, TaskId, Thought, ToolCall, Trajectory};
 pub use react::{Decision, Phase, ReActEngine, Reasoner, StateMachine, StepObserver, ToolExecutor};
-pub use safety::{classify, Risk, ToolSafety};
+pub use safety::{classify, classify_annotated, Risk, ToolSafety};
 
 #[cfg(test)]
 mod tests {

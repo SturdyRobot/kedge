@@ -82,16 +82,24 @@ impl Policy {
             })?);
         }
         Ok(Policy {
-            blocked: cfg.blocked_tools.into_iter().collect(),
+            // Normalize once at compile time so the blocklist can't be evaded by
+            // case or surrounding whitespace (`Shell`, `shell `, ` SHELL`).
+            blocked: cfg
+                .blocked_tools
+                .into_iter()
+                .map(|t| t.trim().to_ascii_lowercase())
+                .collect(),
             pii,
             max_tokens: cfg.max_tokens_per_run,
             max_steps: cfg.max_steps_per_run,
         })
     }
 
-    /// Whether `tool` is permitted.
+    /// Whether `tool` is permitted. The name is normalized (trimmed + lowercased)
+    /// the same way the blocklist is, so `Shell`/`shell `/`SHELL` are all blocked
+    /// if `shell` is.
     pub fn allows_tool(&self, tool: &str) -> bool {
-        !self.blocked.contains(tool)
+        !self.blocked.contains(&tool.trim().to_ascii_lowercase())
     }
 
     /// Replace every configured PII pattern with `[REDACTED]`.
@@ -164,6 +172,18 @@ mod tests {
         assert!(p.allows_tool("search"));
         assert_eq!(p.budget().max_tokens, 50_000);
         assert_eq!(p.budget().max_steps, 20);
+    }
+
+    #[test]
+    fn blocklist_is_case_and_whitespace_insensitive() {
+        // Red-team regression: the blocklist must not be evadable by casing or
+        // surrounding whitespace.
+        let p = Policy::from_toml_str(TOML).unwrap();
+        assert!(!p.allows_tool("shell"));
+        assert!(!p.allows_tool("Shell"));
+        assert!(!p.allows_tool("SHELL"));
+        assert!(!p.allows_tool("  shell "));
+        assert!(!p.allows_tool("Delete_File"));
     }
 
     #[test]

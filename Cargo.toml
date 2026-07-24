@@ -88,6 +88,7 @@ indicatif = { workspace = true }
 toml = { workspace = true }
 kedge-audit = { path = "crates/kedge-audit", version = "0.1.0" }
 kedge-hitl = { path = "crates/kedge-hitl", version = "0.1.0" }
+kedge-policy = { path = "crates/kedge-policy", version = "0.1.0" }
 kedge-eval = { path = "crates/kedge-eval", version = "0.1.0" }
 kedge-server = { path = "crates/kedge-server", version = "0.1.0" }
 

@@ -15,8 +15,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -31,6 +32,46 @@ use uuid::Uuid;
 struct AppState {
     ledger: Ledger,
     approvals: Arc<PendingApprovals>,
+    /// When set, every endpoint except `/health` requires
+    /// `Authorization: Bearer <token>`. Without it, anyone who can reach the port
+    /// could read full trajectories (prompts/args/outputs) or — worse — resolve a
+    /// pending human-in-the-loop approval.
+    token: Option<Arc<String>>,
+}
+
+/// Constant-time string comparison so token checking doesn't leak length-prefix
+/// timing. (Length itself can differ; that's an acceptable, minor leak.)
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Reject any request without a valid bearer token. Applied only to protected
+/// routes; `/health` stays open for liveness probes.
+async fn require_auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    let Some(expected) = &s.token else {
+        return next.run(req).await; // auth disabled (loopback-only, no token set)
+    };
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match presented {
+        Some(t) if ct_eq(t, expected) => next.run(req).await,
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            "unauthorized: set Authorization: Bearer <KEDGE_SERVE_TOKEN>\n",
+        )
+            .into_response(),
+    }
 }
 
 /// A minimal API error that renders as an HTTP status + message.
@@ -48,26 +89,51 @@ impl From<kedge_ledger::LedgerError> for ApiError {
     }
 }
 
-/// Build the router over a ledger + a shared approvals registry. Exposed for tests.
-pub fn router(ledger: Ledger, approvals: Arc<PendingApprovals>) -> Router {
-    Router::new()
-        .route("/health", get(health))
+/// Build the router over a ledger + a shared approvals registry. When `token` is
+/// `Some`, all endpoints except `/health` require a matching bearer token.
+/// Exposed for tests.
+pub fn router(ledger: Ledger, approvals: Arc<PendingApprovals>, token: Option<String>) -> Router {
+    let state = AppState {
+        ledger,
+        approvals,
+        token: token.map(Arc::new),
+    };
+    // Everything that exposes run data or mutates approval state sits behind auth.
+    let protected = Router::new()
         .route("/runs", get(list_runs))
         .route("/runs/:id", get(get_run))
         .route("/approvals", get(list_approvals))
         .route("/approvals/:id", post(resolve_approval))
-        .with_state(AppState { ledger, approvals })
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
+        .with_state(state)
 }
 
 /// Serve the control API on `addr` until the process exits.
+///
+/// **Fail-safe:** refuses to bind a non-loopback address without a token, so you
+/// can't accidentally expose unauthenticated approval-resolution to the network.
 pub async fn serve(
     ledger: Ledger,
     approvals: Arc<PendingApprovals>,
     addr: SocketAddr,
+    token: Option<String>,
 ) -> std::io::Result<()> {
+    if !addr.ip().is_loopback() && token.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to bind {addr}: a non-loopback address with no auth would expose \
+                 unauthenticated approval-resolution and full ledger reads to the network. \
+                 Set KEDGE_SERVE_TOKEN, or bind a loopback address (127.0.0.1)."
+            ),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "kedge control API listening");
-    axum::serve(listener, router(ledger, approvals)).await
+    tracing::info!(%addr, authed = token.is_some(), "kedge control API listening");
+    axum::serve(listener, router(ledger, approvals, token)).await
 }
 
 async fn health() -> &'static str {
@@ -118,13 +184,78 @@ mod tests {
     use super::*;
 
     async fn spawn() -> (String, Ledger, Arc<PendingApprovals>) {
+        spawn_with(None).await
+    }
+
+    async fn spawn_with(token: Option<String>) -> (String, Ledger, Arc<PendingApprovals>) {
         let ledger = Ledger::in_memory().unwrap();
         let approvals = PendingApprovals::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(ledger.clone(), approvals.clone());
+        let app = router(ledger.clone(), approvals.clone(), token);
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), ledger, approvals)
+    }
+
+    #[tokio::test]
+    async fn protected_routes_require_a_token_when_one_is_set() {
+        let (base, _ledger, approvals) = spawn_with(Some("s3cret".into())).await;
+        let c = reqwest::Client::new();
+
+        // /health stays open.
+        assert!(c
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success());
+
+        // No token → 401 on protected routes.
+        assert_eq!(
+            c.get(format!("{base}/runs")).send().await.unwrap().status(),
+            401
+        );
+        // Wrong token → 401.
+        assert_eq!(
+            c.get(format!("{base}/runs"))
+                .bearer_auth("wrong")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        // Critically: resolving an approval must not be possible unauthenticated.
+        let (id, _rx) = approvals.register("delete_file", "high");
+        assert_eq!(
+            c.post(format!("{base}/approvals/{id}"))
+                .json(&json!({ "approved": true }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+
+        // Correct token → allowed.
+        assert!(c
+            .get(format!("{base}/runs"))
+            .bearer_auth("s3cret")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success());
+    }
+
+    #[tokio::test]
+    async fn refuses_non_loopback_bind_without_a_token() {
+        let ledger = Ledger::in_memory().unwrap();
+        let approvals = PendingApprovals::new();
+        let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let err = serve(ledger, approvals, addr, None).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[tokio::test]

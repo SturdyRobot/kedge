@@ -28,8 +28,11 @@ use kedge_ledger::Ledger;
 use kedge_llm::{ChatReasoner, ToolSpec};
 use kedge_mcp::McpClient;
 
+mod guard;
 mod mcp_server;
 mod telemetry;
+
+use guard::GuardMode;
 
 /// A deterministic AI agent execution & verification harness.
 #[derive(Parser)]
@@ -68,7 +71,9 @@ enum Command {
 struct ServeArgs {
     #[arg(long, env = "KEDGE_LEDGER_PATH", default_value = "kedge.sqlite")]
     db: PathBuf,
-    /// Address to bind, e.g. 127.0.0.1:8787 or 0.0.0.0:8787.
+    /// Address to bind. Loopback (127.0.0.1) needs no auth; any non-loopback
+    /// address (e.g. 0.0.0.0:8787) REQUIRES a token in $KEDGE_SERVE_TOKEN and is
+    /// refused without one.
     #[arg(long, default_value = "127.0.0.1:8787")]
     addr: String,
 }
@@ -156,12 +161,24 @@ struct RunArgs {
     json: bool,
     /// Shadow-audit (dry-run): execute read-only tools for real, but intercept
     /// every mutating tool — nothing is written/called — and journal the intent.
+    /// This is the DEFAULT when no mode flag is given.
     #[arg(long)]
     audit: bool,
     /// Human-in-the-loop: pause on every mutating tool and ask for approval
     /// (y/N) before it runs. Each decision is journaled.
     #[arg(long, conflicts_with = "audit")]
     hitl: bool,
+    /// Read-only lockdown: refuse every mutating tool outright.
+    #[arg(long, conflicts_with_all = ["audit", "hitl"])]
+    deny: bool,
+    /// No guard — give the agent an unrestricted shell that executes for real.
+    /// Explicit opt-in; overrides the safe-by-default audit posture.
+    #[arg(long, conflicts_with_all = ["audit", "hitl", "deny"])]
+    live: bool,
+    /// Policy file (blocked_tools + pii_redaction). Defaults to ./kedge-policy.toml
+    /// if present.
+    #[arg(long)]
+    policy: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -418,10 +435,23 @@ async fn cmd_serve(a: ServeArgs) -> Result<()> {
     let ledger = Ledger::open(&a.db).context("opening ledger")?;
     let approvals = kedge_hitl::PendingApprovals::new();
     let addr: std::net::SocketAddr = a.addr.parse().context("parsing --addr")?;
+    // Auth token from the environment (never a flag — flags land in shell history).
+    let token = std::env::var("KEDGE_SERVE_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
     println!(
-        "🌐 kedge control API on http://{addr}\n   GET /runs · GET /runs/<id> · GET /approvals · POST /approvals/<id>"
+        "🌐 kedge control API on http://{addr}  [{}]\n   GET /runs · GET /runs/<id> · GET /approvals · POST /approvals/<id>",
+        if token.is_some() { "auth: bearer token required" } else { "auth: OFF (loopback only)" }
     );
-    kedge_server::serve(ledger, approvals, addr)
+    if token.is_none() {
+        eprintln!(
+            "⚠️  no $KEDGE_SERVE_TOKEN set: ANY local process (including an agent's own \
+             live-mode shell) can read run trajectories and RESOLVE pending HITL approvals. \
+             Set KEDGE_SERVE_TOKEN to require a bearer token — the token is not in the agent \
+             shell's scrubbed environment, so the agent cannot self-approve."
+        );
+    }
+    kedge_server::serve(ledger, approvals, addr, token)
         .await
         .context("control API server")?;
     Ok(())
@@ -539,7 +569,8 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     ledger.begin_run(&task)?;
 
     // Tool source: an MCP server if requested, otherwise the built-in shell tool.
-    let (tool_specs, tools): (Vec<ToolSpec>, Arc<dyn ToolExecutor>) = match &mcp {
+    // `caps` carries declared per-tool safety resolved from MCP annotations.
+    let (tool_specs, tools, caps): (Vec<ToolSpec>, Arc<dyn ToolExecutor>, Option<guard::Capabilities>) = match &mcp {
         Some(cmd) => {
             let parts: Vec<String> = cmd.split_whitespace().map(String::from).collect();
             let program = parts
@@ -570,14 +601,30 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
                     )
                 })
                 .collect();
-            (specs, Arc::new(client))
+            // Resolve each external tool's safety from its (untrusted) MCP
+            // annotations — hints may only UPGRADE restriction, never downgrade.
+            let caps: std::collections::HashMap<String, kedge_core::ToolSafety> = mcp_tools
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.clone(),
+                        kedge_core::classify_annotated(
+                            &t.name,
+                            t.annotations.read_only_hint,
+                            t.annotations.destructive_hint,
+                        ),
+                    )
+                })
+                .collect();
+            (specs, Arc::new(client) as Arc<dyn ToolExecutor>, Some(Arc::new(caps)))
         }
         None => (
             vec![shell_tool_spec()],
             Arc::new(ShellTool {
                 cwd: a.cwd.clone(),
                 timeout: Duration::from_secs(30),
-            }),
+            }) as Arc<dyn ToolExecutor>,
+            None,
         ),
     };
 
@@ -585,6 +632,12 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     let reasoner: Arc<dyn Reasoner> = match &model {
         Some(m) => {
             let key = api_key_env.as_ref().and_then(|e| std::env::var(e).ok());
+            // Scrub the key from our own env now that we hold it: the agent's shell
+            // child gets an allowlist-scrubbed env, but that doesn't stop it reading
+            // the parent's env via /proc/<ppid>/environ — removing it here does.
+            if let Some(e) = &api_key_env {
+                std::env::remove_var(e);
+            }
             if !json {
                 println!("  model: {m} @ {api_base}");
             }
@@ -598,30 +651,54 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         None => Arc::new(DemoReasoner),
     };
 
-    // Layer the toolset per mode: --audit dry-runs mutating tools; --hitl asks a
-    // human to approve each one; otherwise tools run normally.
-    let tools: Arc<dyn ToolExecutor> = if a.audit {
-        if !json {
-            println!("🛡  shadow-audit: mutating tools will be intercepted (nothing is executed)");
-        }
-        Arc::new(kedge_audit::AuditExecutor::new(
-            tools,
-            Some(Arc::new(ledger.clone())),
-            task.id,
-        ))
+    // Layer the toolset per mode through the single canonical guard chain (shared
+    // with the MCP server). Safe by default: with no mode flag we shadow-audit, so
+    // `kedge run` never hands the model an unguarded shell unless you ask for it
+    // with --live. --hitl asks a human; --deny refuses mutations.
+    let mode = if a.live {
+        GuardMode::Live
     } else if a.hitl {
-        if !json {
-            println!("🙋 human-in-the-loop: you'll be asked to approve each mutating tool");
-        }
-        Arc::new(kedge_hitl::ApprovalGate::new(
-            tools,
-            Arc::new(kedge_hitl::CliApprover),
-            Some(Arc::new(ledger.clone())),
-            task.id,
-        ))
+        GuardMode::Hitl
+    } else if a.deny {
+        GuardMode::Deny
     } else {
-        tools
+        GuardMode::Audit // default (or explicit --audit)
     };
+    // Load policy from --policy or the OPERATOR's invocation directory — never from
+    // a.cwd, which may be an untrusted repo the agent was pointed at.
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = guard::load_policy(a.policy.as_deref(), &invocation_dir)?;
+    if !json {
+        match mode {
+            GuardMode::Audit => println!(
+                "🛡  shadow-audit (default): mutating tools are intercepted (nothing is executed)"
+            ),
+            GuardMode::Hitl => {
+                println!("🙋 human-in-the-loop: you'll be asked to approve each mutating tool")
+            }
+            GuardMode::Deny => println!("⛔ read-only lockdown: mutating tools are refused"),
+            GuardMode::Live => {
+                println!("⚠️  live: the agent has an UNGUARDED shell — tools execute for real")
+            }
+        }
+        if policy.is_some() {
+            println!("   policy: kedge-policy.toml loaded (blocked tools + PII redaction active)");
+        }
+    }
+    let approver: Option<Arc<dyn kedge_hitl::Approver>> =
+        (mode == GuardMode::Hitl).then(|| Arc::new(kedge_hitl::CliApprover) as Arc<dyn kedge_hitl::Approver>);
+    let chain = guard::build(
+        mode,
+        policy,
+        approver,
+        caps,
+        tools,
+        Some(Arc::new(ledger.clone())),
+        task.id,
+    );
+    let auditor = chain.auditor.clone();
+    let gate = chain.gate.clone();
+    let tools = chain.tools;
 
     let engine = ReActEngine::new(reasoner, tools, budget.clone()).with_observer(ledger.observer());
     if !json {
@@ -672,6 +749,19 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         trajectory.len(),
         budget.tokens_used()
     );
+    // Safety summary — never let an intercepted dry-run read as real work.
+    if let Some(a) = &auditor {
+        println!(
+            "  shadow-audit: {} mutating tool call(s) intercepted — nothing was executed",
+            a.intercepted()
+        );
+    }
+    if let Some(g) = &gate {
+        let denied = g.denied();
+        if denied > 0 {
+            println!("  {denied} mutating tool call(s) were refused");
+        }
+    }
     println!(
         "  replay with: kedge replay {} --db {}",
         task.id,

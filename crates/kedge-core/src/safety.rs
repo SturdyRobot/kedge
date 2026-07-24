@@ -73,51 +73,88 @@ const READ_VERBS: &[&str] = &[
     "check",
 ];
 
-/// Explicitly dangerous verbs.
+/// Explicitly dangerous verbs — destructive, privileged, or externally-visible.
 const HIGH_RISK_VERBS: &[&str] = &[
-    "exec",
-    "execute",
-    "shell",
-    "run",
-    "delete",
-    "rm",
-    "drop",
-    "kill",
-    "destroy",
-    "remove",
-    "sudo",
-    "chmod",
-    "chown",
-    "format",
-    "truncate",
-    "overwrite",
-    "deploy",
-    "publish",
-    "send",
-    "post",
-    "charge",
-    "transfer",
-    "pay",
+    "exec", "execute", "shell", "run", "eval", "spawn", "delete", "rm", "drop", "kill", "destroy",
+    "remove", "wipe", "erase", "purge", "unlink", "sudo", "chmod", "chown", "format", "truncate",
+    "overwrite", "deploy", "publish", "release", "send", "post", "email", "charge", "transfer",
+    "pay", "revoke", "shutdown", "reboot", "restart",
 ];
 
-/// Classify a tool by its name. **Fail-safe:** anything not recognized as clearly
-/// read-only is treated as mutating, so an oddly-named side-effecting tool (e.g.
-/// `send_email`, `charge_card`) is never executed for real in audit mode.
-pub fn classify(tool_name: &str) -> ToolSafety {
-    let head = tool_name
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+/// Clearly side-effecting but non-destructive verbs — still mutating, so still
+/// intercepted in audit mode, just a lower risk label.
+const MUTATING_VERBS: &[&str] = &[
+    "write", "create", "update", "set", "modify", "insert", "append", "save", "edit", "patch",
+    "rename", "move", "mv", "copy", "cp", "upload", "install", "commit", "push", "merge", "grant",
+    "enable", "disable", "start", "stop", "register", "unregister", "subscribe", "unsubscribe",
+    "mkdir", "put", "add", "replace", "apply", "sync", "provision", "invoke", "trigger", "submit",
+];
 
-    if READ_VERBS.contains(&head.as_str()) {
-        ToolSafety::ReadOnly
-    } else if HIGH_RISK_VERBS.contains(&head.as_str()) {
-        ToolSafety::Mutating { risk: Risk::High }
-    } else {
-        // Unknown verb → assume it can mutate. Safety over convenience.
-        ToolSafety::Mutating { risk: Risk::Medium }
+/// Classify a tool by its name. **Fail-safe and deny-wins:** anything not
+/// recognized as clearly read-only is treated as mutating.
+///
+/// Unlike a head-verb-only check, this scans *every* token in the name, so a
+/// compound like `get_and_delete` or `list_then_wipe` — which reads as read-only
+/// if you only look at the first word — is correctly caught as mutating. A name is
+/// classified read-only only when its head is a read verb **and** no token
+/// anywhere in the name is a mutating/dangerous verb.
+///
+/// Note: this is still *name*-based and cannot see arguments. A generic tool like
+/// `fetch`/`request` that mutates via a `method` argument classifies read-only by
+/// name; declare such a tool's capability explicitly to gate it correctly.
+pub fn classify(tool_name: &str) -> ToolSafety {
+    let tokens: Vec<String> = tool_name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+
+    // Deny-wins: a dangerous token anywhere makes the whole tool high-risk, even
+    // when the name *starts* with a read verb.
+    if tokens.iter().any(|t| HIGH_RISK_VERBS.contains(&t.as_str())) {
+        return ToolSafety::Mutating { risk: Risk::High };
     }
+    // Any other clearly side-effecting token → mutating (medium risk).
+    if tokens.iter().any(|t| MUTATING_VERBS.contains(&t.as_str())) {
+        return ToolSafety::Mutating { risk: Risk::Medium };
+    }
+    // Read-only only if the head is a read verb and nothing above tripped.
+    match tokens.first() {
+        Some(head) if READ_VERBS.contains(&head.as_str()) => ToolSafety::ReadOnly,
+        // Unknown / empty → assume it can mutate. Safety over convenience.
+        _ => ToolSafety::Mutating { risk: Risk::Medium },
+    }
+}
+
+/// Classify honoring optional capability hints (e.g. MCP tool `annotations`),
+/// **fail-safe**: a hint may only make a tool *more* restricted, never less.
+///
+/// This is the safe way to incorporate declared capabilities from a source you
+/// don't fully trust (a remote MCP server controls its own tool metadata). A
+/// server claiming `read_only_hint = true` on a name that looks mutating is **not**
+/// trusted to downgrade it — otherwise a hostile server could label a destructive
+/// tool read-only to get it executed for real in audit mode. Only *upgrades*
+/// (`destructive_hint = true`, or `read_only_hint = false`) are honored.
+pub fn classify_annotated(
+    name: &str,
+    read_only_hint: Option<bool>,
+    destructive_hint: Option<bool>,
+) -> ToolSafety {
+    let base = classify(name);
+    // Explicitly destructive → high risk, always (upgrade).
+    if destructive_hint == Some(true) {
+        return ToolSafety::Mutating { risk: Risk::High };
+    }
+    // Explicitly not-read-only → at least mutating (upgrade a name that looked read).
+    if read_only_hint == Some(false) {
+        return match base {
+            ToolSafety::ReadOnly => ToolSafety::Mutating { risk: Risk::Medium },
+            other => other,
+        };
+    }
+    // A `read_only_hint = true` is deliberately NOT trusted to downgrade a
+    // mutating-looking name; it can only leave an already-read-only name as-is.
+    base
 }
 
 #[cfg(test)]
@@ -150,5 +187,76 @@ mod tests {
             ToolSafety::Mutating { risk: Risk::Medium }
         );
         assert_eq!(classify(""), ToolSafety::Mutating { risk: Risk::Medium });
+    }
+
+    /// Red-team regression: a mutating tool whose NAME STARTS with a read verb
+    /// must NOT slip through as read-only (the head-token-only bypass). Every one
+    /// of these executed for real in audit mode before the deny-wins scan.
+    #[test]
+    fn read_verb_prefix_does_not_hide_a_mutation() {
+        for name in [
+            "get_and_delete",
+            "list_then_wipe",
+            "search_and_destroy",
+            "read_and_remove",
+            "fetch_and_post",
+            "get_or_create",   // classic MCP pattern
+            "status_update",   // read verb head, but it UPDATES
+            "read_write",
+            "find_and_replace",
+            "search_and_replace",
+            "list_exec",
+        ] {
+            assert!(
+                classify(name).is_mutating(),
+                "`{name}` must be treated as mutating, not read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn annotations_can_only_upgrade_safety_never_downgrade() {
+        // A hostile server can't relabel a destructive tool as read-only to slip it
+        // past the audit guard.
+        assert_eq!(
+            classify_annotated("delete_everything", Some(true), None),
+            ToolSafety::Mutating { risk: Risk::High },
+            "read_only_hint=true must NOT downgrade a mutating name"
+        );
+        // But a hint CAN upgrade an innocuously-named tool that actually mutates.
+        assert!(
+            classify_annotated("get_weather", None, Some(true)).is_mutating(),
+            "destructive_hint=true must upgrade a read-looking name"
+        );
+        assert!(
+            classify_annotated("lookup", Some(false), None).is_mutating(),
+            "read_only_hint=false must upgrade a read-looking name"
+        );
+        // No hints → identical to plain name classification.
+        assert_eq!(classify_annotated("read_file", None, None), classify("read_file"));
+        // A truthful read-only hint on a read-only name leaves it read-only.
+        assert_eq!(
+            classify_annotated("get_status", Some(true), None),
+            ToolSafety::ReadOnly
+        );
+    }
+
+    #[test]
+    fn compound_read_only_names_still_read_only() {
+        // Genuinely read-only compounds must not become false-positive mutations.
+        for name in [
+            "get_user",
+            "list_directory",
+            "search_code",
+            "read_file_contents",
+            "describe_table",
+            "fetch_status",
+        ] {
+            assert_eq!(
+                classify(name),
+                ToolSafety::ReadOnly,
+                "`{name}` should stay read-only"
+            );
+        }
     }
 }

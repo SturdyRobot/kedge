@@ -30,20 +30,37 @@ is to keep a model's chosen actions inside bounds the operator set.
 - Enforce token, step, and wall-clock budgets as ceilings, checked *before* work
   happens rather than after
 - Intercept mutating tool calls in `audit` (Shadow-Guard) mode so an intended
-  side effect is journaled without being executed
-- Fail *safe* when classifying tools: anything not recognized as clearly
-  read-only is treated as mutating
+  side effect is journaled without being executed. **Safe by default:** both the
+  CLI (`kedge run`) and the MCP `kedge_run` tool default to `audit` — an unguarded
+  shell requires an explicit `--live` / `mode="live"` opt-in
+- Fail *safe* and *deny-wins* when classifying tools: the classifier scans every
+  token in a tool's name, so a compound like `get_and_delete` or `list_then_wipe`
+  is caught as mutating even though it starts with a read verb. Anything not
+  clearly read-only is treated as mutating
+- Scrub the environment of any child process a tool spawns: only an allowlist of
+  build-relevant, non-secret vars is inherited, so a model-driven `shell` can't
+  read the harness's API keys (`$OPENAI_API_KEY`, …) out of its own environment.
+  The harness also **removes its own LLM API key from its process environment**
+  after reading it, so a child can't recover it via `/proc/<ppid>/environ` either
+- Enforce `kedge-policy.toml` (`blocked_tools`, `pii_redaction`) on both the CLI
+  and MCP run paths
 - Journal every step to SQLite so any run can be replayed and audited after the
-  fact
+  fact — and **fail the run loudly** rather than proceed if a security-relevant
+  event (an interception or an approval decision) can't be journaled
 
 **What Kedge does not claim**
 
 - It is **not a sandbox.** In `live` mode the agent's `shell` tool executes
-  arbitrary programs with the privileges of the process that launched it. If you
-  need containment, run Kedge inside one (container, VM, or the `kedge-probe`
-  eBPF supervisor on Linux) — the guards are policy, not isolation.
-- Tool classification is **name-based**. It is a strong default, not a proof. A
-  tool named to look read-only that mutates state will be treated as read-only.
+  arbitrary programs with the privileges of the process that launched it (though
+  their environment is scrubbed of secrets by default). If you need containment,
+  run Kedge inside one (container, VM, or the `kedge-probe` eBPF supervisor on
+  Linux) — the guards are policy, not isolation.
+- Tool classification is **name-based**, augmented by declared capabilities. It
+  scans every token and fails safe, and it honors an MCP tool's `readOnlyHint` /
+  `destructiveHint` annotations — but only ever to make a tool *more* restricted,
+  never less, so a hostile server can't relabel a destructive tool read-only. It
+  still can't see arguments: a generic `fetch`/`request` tool that mutates via a
+  `method` argument classifies read-only unless its server declares otherwise.
 - It does not defend against a malicious *operator*, a compromised model
   endpoint, or a hostile MCP server you deliberately connected.
 
@@ -58,6 +75,10 @@ is to keep a model's chosen actions inside bounds the operator set.
   the model an unguarded shell — an explicit, deliberate opt-in.
 - Ledgers contain full prompts, tool arguments, and outputs. Treat
   `kedge.sqlite` (and any `KEDGE_LEDGER_PATH` you set) as sensitive.
+- The `kedge serve` control API (which can resolve human-in-the-loop approvals and
+  read full trajectories) is **loopback-only by default**. Binding a non-loopback
+  address requires a bearer token in `$KEDGE_SERVE_TOKEN`; without one, `serve`
+  refuses to start. All endpoints except `/health` require the token when set.
 
 ## Supported versions
 

@@ -12,6 +12,7 @@
 //! measured tokens for the ledger, and any projection driven by *your* explicit
 //! price/volume inputs, never a baked-in figure.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -47,6 +48,9 @@ pub struct AuditExecutor {
     ledger: Option<Arc<Ledger>>,
     run_id: TaskId,
     intercepted: AtomicU64,
+    /// Pre-resolved per-tool safety (e.g. from MCP annotations). Consulted before
+    /// falling back to name-based [`classify`]. `None` → pure name classification.
+    caps: Option<Arc<HashMap<String, ToolSafety>>>,
 }
 
 impl AuditExecutor {
@@ -56,7 +60,22 @@ impl AuditExecutor {
             ledger,
             run_id,
             intercepted: AtomicU64::new(0),
+            caps: None,
         }
+    }
+
+    /// Attach a declared-capability map (name → resolved safety). Entries win over
+    /// name-based classification; unknown names still fall back to [`classify`].
+    pub fn with_capabilities(mut self, caps: Option<Arc<HashMap<String, ToolSafety>>>) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    fn safety_of(&self, name: &str) -> ToolSafety {
+        self.caps
+            .as_ref()
+            .and_then(|m| m.get(name).copied())
+            .unwrap_or_else(|| classify(name))
     }
 
     /// How many mutating calls have been intercepted.
@@ -68,20 +87,35 @@ impl AuditExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for AuditExecutor {
     async fn execute(&self, call: &ToolCall) -> kedge_core::Result<Observation> {
-        match classify(&call.name) {
+        match self.safety_of(&call.name) {
             ToolSafety::ReadOnly => self.inner.execute(call).await,
             ToolSafety::Mutating { risk } => {
                 self.intercepted.fetch_add(1, Ordering::SeqCst);
                 tracing::info!(tool = %call.name, risk = risk.as_str(), "shadow-audit: intercepted mutating tool");
                 if let Some(ledger) = &self.ledger {
-                    let _ = ledger.record_event(
-                        self.run_id,
-                        &Event::ToolExecutionAudited {
-                            tool: call.name.clone(),
-                            risk: risk.as_str().to_string(),
-                            arguments: call.arguments.clone(),
-                        },
-                    );
+                    // The audit trail IS the guarantee. If we can't record that a
+                    // mutating call was intercepted, we must NOT return a clean
+                    // synthetic success — that would produce a misleadingly "clean"
+                    // audit. Fail the run loudly instead of dropping the event.
+                    ledger
+                        .record_event(
+                            self.run_id,
+                            &Event::ToolExecutionAudited {
+                                tool: call.name.clone(),
+                                risk: risk.as_str().to_string(),
+                                arguments: call.arguments.clone(),
+                            },
+                        )
+                        .map_err(|e| {
+                            kedge_core::HarnessError::backend(
+                                "audit-journal",
+                                format!(
+                                    "failed to journal intercepted `{}` — refusing to continue \
+                                     with an incomplete audit trail: {e}",
+                                    call.name
+                                ),
+                            )
+                        })?;
                 }
                 Ok(Observation::ok(format!(
                     "[SHADOW AUDIT] mutating tool `{}` ({} risk) was intercepted and NOT executed — \

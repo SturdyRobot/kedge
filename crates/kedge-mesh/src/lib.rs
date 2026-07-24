@@ -247,14 +247,18 @@ async fn supervise(
                 tokens: *tokens_used,
             });
             if let Some(ledger) = &ledger {
-                let _ = ledger.record_event(
+                if let Err(e) = ledger.record_event(
                     config.parent_run_id,
                     &kedge_ledger::Event::SubagentFailed {
                         name: config.name.clone(),
                         reason: reason.clone(),
                         tokens_used: *tokens_used,
                     },
-                );
+                ) {
+                    // Not side-effect-gating like the audit/HITL events, so we
+                    // don't abort — but never drop it silently.
+                    tracing::error!(subagent = %config.name, error = %e, "failed to journal SubagentFailed");
+                }
             }
         }
     }
