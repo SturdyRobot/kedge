@@ -219,8 +219,22 @@ fn tool_specs() -> Value {
             }
         },
         {
+            "name": "kedge_expand",
+            "description": "The inverse of kedge_compact: return the full source of the named function(s) a skeleton elided, bodies included. Use this after orienting on a compacted skeleton when you need to EDIT a specific function whose body you never saw — fetch just that body instead of re-reading the whole file. The skeleton shows each name above its `/* … elided */` marker, so you already know what to ask for. Deterministic, no LLM.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "The function or method name to expand (as shown in the skeleton signature)." },
+                    "path": { "type": "string", "description": "Path to the source file; language detected from its extension." },
+                    "code": { "type": "string", "description": "Raw source text (use together with `lang` instead of `path`)." },
+                    "lang": { "type": "string", "enum": ["rust", "python", "javascript", "typescript", "go"], "description": "Force or declare the language." }
+                },
+                "required": ["symbol"]
+            }
+        },
+        {
             "name": "kedge_audit",
-            "description": "Forensic report from an Kedge SQLite ledger: total runs, tokens consumed, intercepted mutations (Shadow-Guard dry-runs), and — when pricing is supplied — a cost projection. Deterministic, no LLM.",
+            "description": "Forensic report from a Kedge SQLite ledger: total runs, tokens consumed, intercepted mutations (Shadow-Guard dry-runs), and — when pricing is supplied — a cost projection. Deterministic, no LLM.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -261,6 +275,7 @@ async fn handle_tool_call(params: &Value) -> Value {
 
     let outcome: Result<String> = match name {
         "kedge_compact" => tool_compact(&args),
+        "kedge_expand" => tool_expand(&args),
         "kedge_audit" => tool_audit(&args),
         "kedge_run" => tool_run(&args).await,
         other => Err(anyhow::anyhow!("unknown tool `{other}`")),
@@ -274,21 +289,50 @@ async fn handle_tool_call(params: &Value) -> Value {
     }
 }
 
-fn tool_compact(args: &Value) -> Result<String> {
+/// Resolve the `path` / `code`+`lang` argument pair (shared by compact + expand)
+/// into the source text and a `Compactor` for the right language.
+fn source_and_compactor(args: &Value) -> Result<(String, Compactor)> {
     let lang = args.get("lang").and_then(Value::as_str);
-    let (source, mut compactor) = if let Some(p) = args.get("path").and_then(Value::as_str) {
+    if let Some(p) = args.get("path").and_then(Value::as_str) {
         let src = std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?;
         let compactor = match lang {
             Some(l) => Compactor::new(parse_lang(l)?)?,
             None => Compactor::for_path(Path::new(p))?,
         };
-        (src, compactor)
+        Ok((src, compactor))
     } else if let Some(code) = args.get("code").and_then(Value::as_str) {
         let l = lang.context("`lang` is required when passing `code`")?;
-        (code.to_string(), Compactor::new(parse_lang(l)?)?)
+        Ok((code.to_string(), Compactor::new(parse_lang(l)?)?))
     } else {
-        anyhow::bail!("provide `path`, or `code` together with `lang`");
-    };
+        anyhow::bail!("provide `path`, or `code` together with `lang`")
+    }
+}
+
+/// Bring back the full source of the named function(s) a skeleton elided — the
+/// "act on it" half of compaction. After orienting on a `kedge_compact`
+/// skeleton, call this to fetch just the body you need to edit.
+fn tool_expand(args: &Value) -> Result<String> {
+    let symbol = args
+        .get("symbol")
+        .and_then(Value::as_str)
+        .context("`symbol` is required — the function/method name to expand")?;
+    let (source, mut compactor) = source_and_compactor(args)?;
+    let matches = compactor.expand(&source, symbol)?;
+    let out = json!({
+        "symbol": symbol,
+        "match_count": matches.len(),
+        "matches": matches,
+        "note": if matches.is_empty() {
+            "no function/method by that name — read the file directly"
+        } else {
+            "full source of each match, bodies included; safe to edit from these"
+        },
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
+}
+
+fn tool_compact(args: &Value) -> Result<String> {
+    let (source, mut compactor) = source_and_compactor(args)?;
 
     let result = match args.get("max_tokens").and_then(Value::as_u64) {
         Some(max) => compactor.compact_to_budget(&source, max as usize)?,
