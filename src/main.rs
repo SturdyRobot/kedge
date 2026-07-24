@@ -669,12 +669,27 @@ async fn cmd_resume(a: ResumeArgs) -> Result<()> {
         goal: detail.goal.clone(),
         workspace: None,
     };
+    // Route the resumed run's tools through the SAME guard chain as `kedge run`:
+    // shadow-audit by default (never a raw, unguarded shell) with policy applied.
+    // A resumed run must not be a back door around the safety posture.
+    let base: Arc<dyn ToolExecutor> = Arc::new(ShellTool {
+        cwd: PathBuf::from("."),
+        timeout: Duration::from_secs(30),
+    });
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = guard::load_policy(None, &invocation_dir)?;
+    let chain = guard::build(
+        GuardMode::Audit,
+        policy,
+        None,
+        None,
+        base,
+        Some(Arc::new(ledger.clone())),
+        task_id,
+    );
     let engine = ReActEngine::new(
         Arc::new(DemoReasoner),
-        Arc::new(ShellTool {
-            cwd: PathBuf::from("."),
-            timeout: Duration::from_secs(30),
-        }),
+        chain.tools,
         Budget::standard().tracker(),
     )
     .with_observer(ledger.observer());

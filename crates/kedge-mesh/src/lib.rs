@@ -26,6 +26,11 @@ pub enum MeshError {
     ChildGone,
 }
 
+/// Hard cap on subagent nesting depth. A subagent that can itself delegate would
+/// otherwise let a run fan out as `breadth^depth` tasks — a fork bomb. Delegation
+/// beyond this depth is refused outright.
+pub const MAX_SUBAGENT_DEPTH: u32 = 4;
+
 /// Hard bounds and identity for a spawned subagent.
 #[derive(Debug, Clone)]
 pub struct SubagentConfig {
@@ -34,10 +39,13 @@ pub struct SubagentConfig {
     pub max_steps: u64,
     pub timeout_secs: u64,
     pub parent_run_id: TaskId,
+    /// Nesting depth: a top-level delegation is 0, its children 1, and so on.
+    /// Delegation past [`MAX_SUBAGENT_DEPTH`] is refused (fork-bomb guard).
+    pub depth: u32,
 }
 
 impl SubagentConfig {
-    /// A conservative default: 20k tokens, 8 steps, 60s.
+    /// A conservative default: 20k tokens, 8 steps, 60s, depth 0.
     pub fn new(name: impl Into<String>, parent_run_id: TaskId) -> Self {
         SubagentConfig {
             name: name.into(),
@@ -45,6 +53,21 @@ impl SubagentConfig {
             max_steps: 8,
             timeout_secs: 60,
             parent_run_id,
+            depth: 0,
+        }
+    }
+
+    /// Derive a child config one level deeper. A subagent that spawns its own
+    /// subagents MUST use this so the depth counter propagates and the fork-bomb
+    /// guard actually fires.
+    pub fn child(&self, name: impl Into<String>) -> Self {
+        SubagentConfig {
+            name: name.into(),
+            max_tokens: self.max_tokens,
+            max_steps: self.max_steps,
+            timeout_secs: self.timeout_secs,
+            parent_run_id: self.parent_run_id,
+            depth: self.depth.saturating_add(1),
         }
     }
 }
@@ -122,6 +145,21 @@ impl SubagentHandle {
 }
 
 /// Spawn `reasoner`/`tools` as a bounded subagent working on `task_prompt`.
+///
+/// # Safety obligations for the caller (integration contract)
+///
+/// This primitive supervises a run but does **not** impose the parent's safety
+/// posture on it. Whoever wires delegation into the engine MUST:
+///
+/// - **Wrap `tools` in the same guard chain as the parent** (audit / policy /
+///   HITL). This function runs whatever executor it is given, raw — pass a
+///   guard-wrapped executor, or a delegated mutation escapes shadow-audit.
+/// - **Bound aggregate budget.** Each subagent gets its *own* [`SubagentConfig`]
+///   budget; N delegations do not draw down a shared parent ceiling here. Cap the
+///   number of delegations and/or derive child budgets from the parent's
+///   remaining, or the parent's token/step ceiling is not a real total.
+/// - **Propagate depth** via [`SubagentConfig::child`] so the [`MAX_SUBAGENT_DEPTH`]
+///   fork-bomb guard (enforced below) actually fires.
 pub fn spawn_subagent(
     config: SubagentConfig,
     task_prompt: impl Into<String>,
@@ -172,6 +210,24 @@ async fn supervise(
     ev_tx: mpsc::Sender<SubagentEvent>,
     mut cmd_rx: mpsc::Receiver<SubagentCommand>,
 ) -> SubagentResult {
+    // Fork-bomb guard: refuse to run past the maximum nesting depth. Enforced here
+    // (not just in the caller) so it holds no matter who invokes the primitive.
+    if config.depth > MAX_SUBAGENT_DEPTH {
+        let reason = format!(
+            "subagent `{}` refused: nesting depth {} exceeds the limit of {}",
+            config.name, config.depth, MAX_SUBAGENT_DEPTH
+        );
+        tracing::warn!(subagent = %config.name, depth = config.depth, "subagent depth limit hit");
+        let _ = ev_tx
+            .try_send(SubagentEvent::Failed {
+                reason: reason.clone(),
+                tokens: 0,
+            });
+        return SubagentResult::Error {
+            reason,
+            tokens_used: 0,
+        };
+    }
     let budget = Budget {
         max_tokens: config.max_tokens,
         max_steps: config.max_steps,
@@ -355,6 +411,37 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use kedge_core::{Decision, Observation, Reasoner, Thought, Trajectory};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn subagent_past_max_depth_is_refused_without_running() {
+        // A tool that flips a flag if it ever executes.
+        struct SpyTool(Arc<AtomicBool>);
+        #[async_trait]
+        impl ToolExecutor for SpyTool {
+            async fn execute(&self, _c: &ToolCall) -> kedge_core::Result<Observation> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(Observation::ok("ran"))
+            }
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let mut config = SubagentConfig::new("too-deep", TaskId::new());
+        config.depth = MAX_SUBAGENT_DEPTH + 1;
+
+        let handle = spawn_subagent(
+            config,
+            "do something",
+            Arc::new(LoopingReasoner),
+            Arc::new(SpyTool(ran.clone())),
+            None,
+        );
+        let result = handle.wait().await;
+        assert!(
+            matches!(result, SubagentResult::Error { .. }),
+            "over-depth subagent must be refused"
+        );
+        assert!(!ran.load(Ordering::SeqCst), "its tools must never execute");
+    }
 
     /// A reasoner that never finishes — always issues another tool call. Drives the
     /// engine straight into its step budget (a classic runaway loop).
