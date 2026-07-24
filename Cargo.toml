@@ -2,7 +2,7 @@
 # The workspace root is also the `kedge` CLI binary.
 [package]
 name = "kedge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "BUSL-1.1"
 description = "A high-throughput, deterministic AI agent execution harness and verification engine."
@@ -28,7 +28,7 @@ exclude = ["crates/kedge-probe-ebpf", "crates/kedge-bridge", "crates/kedge-web"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "BUSL-1.1"
 authors = ["Noel Jackson <noeljacksonjs@gmail.com>"]
@@ -36,12 +36,12 @@ repository = "https://github.com/nlj3/kedge"
 
 # One source of truth for dependency versions across every crate.
 [workspace.dependencies]
-kedge-core = { path = "crates/kedge-core", version = "0.1.0" }
-kedge-compact = { path = "crates/kedge-compact", version = "0.1.0" }
-kedge-mcp = { path = "crates/kedge-mcp", version = "0.1.0" }
-kedge-exec = { path = "crates/kedge-exec", version = "0.1.0" }
-kedge-ledger = { path = "crates/kedge-ledger", version = "0.1.0" }
-kedge-llm = { path = "crates/kedge-llm", version = "0.1.0" }
+kedge-core = { path = "crates/kedge-core", version = "0.2.0" }
+kedge-compact = { path = "crates/kedge-compact", version = "0.2.0" }
+kedge-mcp = { path = "crates/kedge-mcp", version = "0.2.0" }
+kedge-exec = { path = "crates/kedge-exec", version = "0.2.0" }
+kedge-ledger = { path = "crates/kedge-ledger", version = "0.2.0" }
+kedge-llm = { path = "crates/kedge-llm", version = "0.2.0" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "sync", "fs", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -86,11 +86,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 indicatif = { workspace = true }
 toml = { workspace = true }
-kedge-audit = { path = "crates/kedge-audit", version = "0.1.0" }
-kedge-hitl = { path = "crates/kedge-hitl", version = "0.1.0" }
-kedge-policy = { path = "crates/kedge-policy", version = "0.1.0" }
-kedge-eval = { path = "crates/kedge-eval", version = "0.1.0" }
-kedge-server = { path = "crates/kedge-server", version = "0.1.0" }
+kedge-audit = { path = "crates/kedge-audit", version = "0.2.0" }
+kedge-hitl = { path = "crates/kedge-hitl", version = "0.2.0" }
+kedge-policy = { path = "crates/kedge-policy", version = "0.2.0" }
+kedge-eval = { path = "crates/kedge-eval", version = "0.2.0" }
+kedge-server = { path = "crates/kedge-server", version = "0.2.0" }
 
 # Optional OpenTelemetry OTLP export — pulled in only under the `otel` feature.
 opentelemetry = { version = "0.32", optional = true }
