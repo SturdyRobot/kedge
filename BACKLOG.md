@@ -35,7 +35,7 @@ classification, the policy matcher, and the forensic audit as an **abi3 wheel**
 *Follow-on:* async agent execution + subagent supervision from Python.
 
 ### ✅ 2. WebAssembly (`kedge-web`) — SHIPPED
-Live on **sturdyrobot.io** (the 🦀 Kedge icon), running the real `kedge-core`
+Live on **nlj.dev** (the 🦀 Kedge icon), running the real `kedge-core`
 engine client-side at ~137 KB. Making core wasm-clean meant target-gating
 tokio/uuid (dropping `net` to avoid `mio`), swapping `std::time::Instant` for
 `web-time::Instant` (std's panics on wasm), and gating the wall-clock timeout.

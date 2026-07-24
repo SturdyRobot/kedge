@@ -1,10 +1,10 @@
 # Kedge
 
-[![CI](https://github.com/SturdyRobot/kedge/actions/workflows/ci.yml/badge.svg)](https://github.com/SturdyRobot/kedge/actions/workflows/ci.yml)
+[![CI](https://github.com/nlj3/kedge/actions/workflows/ci.yml/badge.svg)](https://github.com/nlj3/kedge/actions/workflows/ci.yml)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-orange.svg)](LICENSE)
-[![Try it live](https://img.shields.io/badge/demo-run%20it%20in%20your%20browser-5ac8fa)](https://sturdyrobot.io)
+[![Try it live](https://img.shields.io/badge/demo-run%20it%20in%20your%20browser-5ac8fa)](https://nlj.dev)
 
-> **Run the engine in your browser** → **[sturdyrobot.io](https://sturdyrobot.io)** (open the Kedge icon)
+> **Run the engine in your browser** → **[nlj.dev](https://nlj.dev)** (open the Kedge icon)
 > The real ReAct engine compiled to WebAssembly — deterministic Think → Act → Observe,
 > executing entirely client-side. No server, no API key, no network.
 
@@ -89,13 +89,13 @@ runtime.
 Install the `kedge` binary straight from GitHub:
 
 ```sh
-cargo install --git https://github.com/SturdyRobot/kedge
+cargo install --git https://github.com/nlj3/kedge
 ```
 
 Or clone and build from source:
 
 ```sh
-git clone https://github.com/SturdyRobot/kedge
+git clone https://github.com/nlj3/kedge
 cd kedge
 cargo install --path .        # installs `kedge` into ~/.cargo/bin
 # or just: cargo build --release   → target/release/kedge

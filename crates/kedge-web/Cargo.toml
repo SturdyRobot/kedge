@@ -4,7 +4,7 @@ description = "WebAssembly bindings — runs the Kedge ReAct engine live in the 
 version = "0.1.0"
 edition = "2021"
 license = "BUSL-1.1"
-repository = "https://github.com/SturdyRobot/kedge"
+repository = "https://github.com/nlj3/kedge"
 
 # A cdylib for the browser. Excluded from the workspace (see root Cargo.toml) so
 # the normal `cargo build`/CI stays native-only; build this with:

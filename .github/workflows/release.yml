@@ -96,7 +96,7 @@ jobs:
             From source:
 
             ```bash
-            cargo install --git https://github.com/SturdyRobot/kedge --bin kedge
+            cargo install --git https://github.com/nlj3/kedge --bin kedge
             ```
 
             ## Licensing
