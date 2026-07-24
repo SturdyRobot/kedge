@@ -311,15 +311,98 @@ async fn handle_tool_call(params: &Value) -> Value {
     }
 }
 
+/// Cap on a file the compaction tools will slurp into memory. Prevents a hostile
+/// `path` (`/dev/zero`, a multi-GB file) from OOM-killing the server.
+const MAX_COMPACT_FILE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+
+/// The directory MCP file operations (`path`, `db`) are confined to. Set via
+/// `$KEDGE_MCP_ROOT`, else the server's current working directory. Canonicalized
+/// once at first use, so an operator who launches the server in a project root
+/// scopes every file the model can read/write to that tree.
+static MCP_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+fn mcp_root() -> &'static Path {
+    MCP_ROOT.get_or_init(|| {
+        let raw = std::env::var_os("KEDGE_MCP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        std::fs::canonicalize(&raw).unwrap_or(raw)
+    })
+}
+
+/// Resolve a caller-supplied path *for reading*, confined under `root`. Rejects
+/// traversal (`..`), symlink escapes, and absolute paths outside the root. The
+/// file must exist (so `canonicalize` fully resolves it).
+fn resolve_read_under(root: &Path, p: &str) -> Result<PathBuf> {
+    let c = Path::new(p);
+    let target = if c.is_absolute() {
+        c.to_path_buf()
+    } else {
+        root.join(c)
+    };
+    let canon = std::fs::canonicalize(&target).with_context(|| format!("resolving path `{p}`"))?;
+    if !canon.starts_with(root) {
+        anyhow::bail!(
+            "`{p}` resolves outside the allowed root {} — set KEDGE_MCP_ROOT to widen access",
+            root.display()
+        );
+    }
+    Ok(canon)
+}
+
+/// Resolve a caller-supplied path *for writing* (e.g. a ledger db), confined under
+/// `root`. The parent directory must exist and be inside the root; the file itself
+/// need not exist yet.
+fn resolve_write_under(root: &Path, p: &str) -> Result<PathBuf> {
+    let c = Path::new(p);
+    let target = if c.is_absolute() {
+        c.to_path_buf()
+    } else {
+        root.join(c)
+    };
+    let parent = target
+        .parent()
+        .filter(|pp| !pp.as_os_str().is_empty())
+        .unwrap_or(root);
+    let canon_parent =
+        std::fs::canonicalize(parent).with_context(|| format!("resolving parent of `{p}`"))?;
+    if !canon_parent.starts_with(root) {
+        anyhow::bail!("`{p}` is outside the allowed root {}", root.display());
+    }
+    let name = target.file_name().context("path has no filename")?;
+    Ok(canon_parent.join(name))
+}
+
+/// Resolve a ledger `db` argument: a caller-supplied path is confined under
+/// [`mcp_root`]; absent, the operator's default (`resolve_ledger_path`, which
+/// honors `$KEDGE_LEDGER_PATH`) is trusted.
+fn resolve_db(args: &Value, for_read: bool) -> Result<PathBuf> {
+    match args.get("db").and_then(Value::as_str) {
+        Some(p) if for_read => resolve_read_under(mcp_root(), p),
+        Some(p) => resolve_write_under(mcp_root(), p),
+        None => Ok(kedge_ledger::resolve_ledger_path(None)),
+    }
+}
+
 /// Resolve the `path` / `code`+`lang` argument pair (shared by compact + expand)
 /// into the source text and a `Compactor` for the right language.
 fn source_and_compactor(args: &Value) -> Result<(String, Compactor)> {
     let lang = args.get("lang").and_then(Value::as_str);
     if let Some(p) = args.get("path").and_then(Value::as_str) {
-        let src = std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?;
+        // Confine the read to the allowed root and cap its size before slurping.
+        let path = resolve_read_under(mcp_root(), p)?;
+        let len = std::fs::metadata(&path)
+            .with_context(|| format!("stat `{p}`"))?
+            .len();
+        if len > MAX_COMPACT_FILE_BYTES {
+            anyhow::bail!(
+                "`{p}` is {len} bytes; the compaction file limit is {MAX_COMPACT_FILE_BYTES} bytes"
+            );
+        }
+        let src = std::fs::read_to_string(&path).with_context(|| format!("reading {p}"))?;
         let compactor = match lang {
             Some(l) => Compactor::new(parse_lang(l)?)?,
-            None => Compactor::for_path(Path::new(p))?,
+            None => Compactor::for_path(&path)?,
         };
         Ok((src, compactor))
     } else if let Some(code) = args.get("code").and_then(Value::as_str) {
@@ -372,8 +455,7 @@ fn tool_compact(args: &Value) -> Result<String> {
     );
     // Best-effort: journal this saving so `kedge_audit` can report a cumulative
     // "tokens saved" total. A ledger problem never fails the compaction itself.
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, false)?;
     let cumulative = match Ledger::open(&db) {
         Ok(ledger) => {
             let label = args.get("path").and_then(Value::as_str);
@@ -410,8 +492,7 @@ fn tool_compact(args: &Value) -> Result<String> {
 }
 
 fn tool_audit(args: &Value) -> Result<String> {
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, true)?;
     let price = args.get("price_per_1k").and_then(Value::as_f64);
     let runs = args.get("runs_per_day").and_then(Value::as_u64);
     let report = kedge_audit::AuditReport::from_ledger(&db, price, runs)
@@ -513,8 +594,7 @@ async fn tool_run(args: &Value) -> Result<String> {
         .unwrap_or(100_000);
     let max_steps = args.get("max_steps").and_then(Value::as_u64).unwrap_or(12);
     let max_secs = args.get("max_secs").and_then(Value::as_u64).unwrap_or(120);
-    let db =
-        kedge_ledger::resolve_ledger_path(args.get("db").and_then(Value::as_str).map(Path::new));
+    let db = resolve_db(args, false)?;
 
     let budget = Budget {
         max_tokens,
@@ -612,6 +692,31 @@ mod tests {
     use super::*;
     use kedge_core::{Observation, TaskId, ToolCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn confined_read_rejects_escapes_and_allows_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("ok.rs"), "fn a() {}").unwrap();
+        // A file inside the root resolves.
+        assert!(resolve_read_under(&root, "ok.rs").is_ok());
+        // Arbitrary-file-read (the H-A exfil primitive) is blocked:
+        assert!(resolve_read_under(&root, "/etc/passwd").is_err());
+        assert!(resolve_read_under(&root, "../escape.rs").is_err());
+        // A nonexistent path inside the root can't be canonicalized → error.
+        assert!(resolve_read_under(&root, "missing.rs").is_err());
+    }
+
+    #[test]
+    fn confined_write_allows_new_file_inside_but_not_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // A new (not-yet-existing) file whose parent is the root is allowed.
+        assert!(resolve_write_under(&root, "run.sqlite").is_ok());
+        // …but not one that escapes the root.
+        assert!(resolve_write_under(&root, "/tmp/evil.sqlite").is_err());
+        assert!(resolve_write_under(&root, "../evil.sqlite").is_err());
+    }
 
     /// Stands in for the real `ShellTool` and records whether it actually ran.
     struct SpyTool(Arc<AtomicUsize>);

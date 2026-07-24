@@ -197,7 +197,7 @@ impl Compactor {
             .parse(source, None)
             .ok_or(CompactError::ParseFailed)?;
         let mut edits: Vec<(usize, usize, String)> = Vec::new();
-        collect_body_elisions(tree.root_node(), source, self.language, &mut edits);
+        collect_body_elisions(tree.root_node(), source, self.language, &mut edits, 0);
         edits.sort_by_key(|e| e.0);
 
         let mut out = String::with_capacity(source.len());
@@ -269,16 +269,33 @@ impl Compactor {
             .parse(source, None)
             .ok_or(CompactError::ParseFailed)?;
         let mut hits = Vec::new();
-        collect_named(tree.root_node(), source, self.language, symbol, &mut hits);
+        collect_named(tree.root_node(), source, self.language, symbol, &mut hits, 0);
         tracing::Span::current().record("matches", hits.len() as u64);
         Ok(hits)
     }
 }
 
+/// Cap on AST recursion depth. Native stacks handle far more, but a pathologically
+/// nested source (thousands of nested blocks) could otherwise overflow the stack —
+/// and a Rust stack overflow aborts the process, uncatchable. Real code never
+/// nests this deep; beyond the cap we simply stop descending (a few function
+/// bodies that deep may go un-elided — a cosmetic loss, never a crash).
+const MAX_AST_DEPTH: u32 = 400;
+
 /// Walk the tree collecting the full text of every function-kind node whose
 /// `name` field equals `symbol`. Mirrors [`collect_body_elisions`] but keeps the
 /// body instead of eliding it, and does not recurse into a matched function.
-fn collect_named(node: Node, source: &str, lang: Language, symbol: &str, out: &mut Vec<String>) {
+fn collect_named(
+    node: Node,
+    source: &str,
+    lang: Language,
+    symbol: &str,
+    out: &mut Vec<String>,
+    depth: u32,
+) {
+    if depth > MAX_AST_DEPTH {
+        return;
+    }
     let kinds = lang.function_kinds();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -294,7 +311,7 @@ fn collect_named(node: Node, source: &str, lang: Language, symbol: &str, out: &m
             // A match's body is what we want; a non-match function can't contain
             // a top-level-named target either — in both cases, don't recurse.
         } else {
-            collect_named(child, source, lang, symbol, out);
+            collect_named(child, source, lang, symbol, out, depth + 1);
         }
     }
 }
@@ -306,7 +323,11 @@ fn collect_body_elisions(
     source: &str,
     lang: Language,
     edits: &mut Vec<(usize, usize, String)>,
+    depth: u32,
 ) {
+    if depth > MAX_AST_DEPTH {
+        return;
+    }
     let kinds = lang.function_kinds();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -323,7 +344,7 @@ fn collect_body_elisions(
             // Do not recurse into the function; its body is gone.
         } else {
             // Descend into impls, classes, modules, etc. to reach nested functions.
-            collect_body_elisions(child, source, lang, edits);
+            collect_body_elisions(child, source, lang, edits, depth + 1);
         }
     }
 }
