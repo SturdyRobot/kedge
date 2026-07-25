@@ -1,7 +1,7 @@
 [package]
 name = "kedge-web"
 description = "WebAssembly bindings — runs the Kedge ReAct engine live in the browser (the hero demo)."
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "BUSL-1.1"
 repository = "https://github.com/nlj3/kedge"
@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # The real engine — no forks, no mocks of the core. What runs in the browser is
 # the same deterministic ReAct state machine + budget enforcement as the CLI.
-kedge-core = { path = "../kedge-core", version = "0.2.0" }
+kedge-core = { path = "../kedge-core", version = "0.3.0" }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

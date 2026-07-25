@@ -3,7 +3,7 @@
 # and needs a nightly toolchain + bpf-linker. See ../kedge-probe/BUILD_EBPF.md.
 [package]
 name = "kedge-probe-ebpf"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 publish = false
 

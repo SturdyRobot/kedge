@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "kedge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-audit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "kedge-core",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-cache"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kedge-compact",
  "rusqlite",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-compact"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kedge-core",
  "serde",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-eval"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kedge-core",
  "kedge-ledger",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-exec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kedge-core",
  "nix",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-hitl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "kedge-audit",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-ledger"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kedge-core",
  "rusqlite",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-llm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "kedge-core",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-mesh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "kedge-core",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-policy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "kedge-core",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-probe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aya",
  "aya-log",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "kedge-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "kedge-core",
