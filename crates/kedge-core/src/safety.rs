@@ -43,6 +43,12 @@ impl ToolSafety {
 
 /// Verbs whose tools only read state — these run for real even in audit mode.
 const READ_VERBS: &[&str] = &[
+    // Deliberately excluded as ambiguous: "open" (open_file may create) and
+    // "convert" (may write its output). Servers that declare `readOnlyHint`
+    // cover those without us guessing.
+    "screenshot",
+    "echo",
+    "tree",
     "read",
     "get",
     "list",
@@ -168,6 +174,10 @@ const MUTATING_VERBS: &[&str] = &[
 /// Note: this is still *name*-based and cannot see arguments. A generic tool like
 /// `fetch`/`request` that mutates via a `method` argument classifies read-only by
 /// name; declare such a tool's capability explicitly to gate it correctly.
+/// How far into a name a read verb may sit and still count: the verb itself, or
+/// the verb behind exactly one namespace prefix.
+const NAMESPACE_WINDOW: usize = 2;
+
 pub fn classify(tool_name: &str) -> ToolSafety {
     let tokens: Vec<String> = tool_name
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -184,11 +194,26 @@ pub fn classify(tool_name: &str) -> ToolSafety {
     if tokens.iter().any(|t| MUTATING_VERBS.contains(&t.as_str())) {
         return ToolSafety::Mutating { risk: Risk::Medium };
     }
-    // Read-only only if the head is a read verb and nothing above tripped.
-    match tokens.first() {
-        Some(head) if READ_VERBS.contains(&head.as_str()) => ToolSafety::ReadOnly,
+    // Read-only if a read verb sits at the head, or directly behind a single
+    // namespace prefix. MCP servers routinely namespace (`puppeteer_screenshot`,
+    // `github_get_file`), which pushes the real verb out of head position and made
+    // every such tool fail safe.
+    //
+    // This cannot weaken deny-wins. Both checks above return early, so reaching
+    // this point already proves no dangerous token appears anywhere in the name;
+    // `get_and_delete` never arrives here. The window is deliberately two rather
+    // than unbounded, which is what keeps an *unrecognised* head honest:
+    // `frobnicate_and_get` still fails safe, because a read verb buried at
+    // position three is not evidence the tool reads.
+    if tokens
+        .iter()
+        .take(NAMESPACE_WINDOW)
+        .any(|t| READ_VERBS.contains(&t.as_str()))
+    {
+        ToolSafety::ReadOnly
+    } else {
         // Unknown / empty → assume it can mutate. Safety over convenience.
-        _ => ToolSafety::Mutating { risk: Risk::Medium },
+        ToolSafety::Mutating { risk: Risk::Medium }
     }
 }
 
@@ -325,6 +350,145 @@ mod tests {
                 classify(name),
                 ToolSafety::ReadOnly,
                 "`{name}` should stay read-only"
+            );
+        }
+    }
+}
+
+/// Regression tests from an ecosystem sweep of 10 real MCP servers (80 tools),
+/// scored against the `readOnlyHint` those servers publish about themselves.
+///
+/// The sweep found zero false negatives and six false positives, all traced to
+/// two causes fixed here: read verbs were only recognised in head position, so
+/// every namespaced tool failed safe, and a few plainly read-only verbs were
+/// missing from the vocabulary.
+#[cfg(test)]
+mod ecosystem {
+    use super::*;
+
+    /// The reason the namespace window exists at all.
+    #[test]
+    fn a_namespace_prefix_no_longer_hides_the_verb() {
+        for name in [
+            "puppeteer_screenshot",
+            "github_get_file",
+            "slack_list_channels",
+            "myserver_read_page",
+            "notion_search_pages",
+            "directory_tree",
+        ] {
+            assert_eq!(
+                classify(name),
+                ToolSafety::ReadOnly,
+                "{name} reads; a namespace prefix should not make it mutating"
+            );
+        }
+    }
+
+    /// The window must not become a bypass. Deny-wins runs first, so a dangerous
+    /// token anywhere still wins no matter where a read verb sits.
+    #[test]
+    fn the_window_never_defeats_deny_wins() {
+        for name in [
+            "get_and_delete",
+            "read_and_write_file",
+            "github_delete_repo",
+            "list_then_rm",
+            "search_and_drop_table",
+            "fetch_and_execute",
+        ] {
+            assert!(
+                classify(name).is_mutating(),
+                "ESCAPE: {name} contains a dangerous verb and must stay mutating"
+            );
+        }
+    }
+
+    /// A read verb buried past the namespace window is not evidence of a read.
+    /// An unrecognised head still fails safe.
+    #[test]
+    fn a_read_verb_beyond_the_window_does_not_rescue_an_unknown_name() {
+        for name in [
+            "frobnicate_and_get",
+            "nuke_the_thing_list",
+            "unknownverb_something_read",
+        ] {
+            assert!(
+                classify(name).is_mutating(),
+                "{name} has an unrecognised head; a distant read verb must not downgrade it"
+            );
+        }
+    }
+
+    /// Vocabulary additions, and the ones deliberately left out.
+    #[test]
+    fn newly_recognised_read_verbs() {
+        for name in ["screenshot", "echo", "tree", "puppeteer_screenshot"] {
+            assert_eq!(classify(name), ToolSafety::ReadOnly, "{name} is read-only");
+        }
+        // Ambiguous on purpose: these can write, so they stay fail-safe and are
+        // left to a server's own declared hints.
+        for name in ["open_nodes", "convert_time"] {
+            assert!(
+                classify(name).is_mutating(),
+                "{name} is ambiguous and must stay fail-safe"
+            );
+        }
+    }
+
+    /// The real filesystem and github catalogues, which the sweep scored by hand.
+    #[test]
+    fn real_server_catalogues_classify_correctly() {
+        let read_only = [
+            "read_file",
+            "read_text_file",
+            "read_media_file",
+            "read_multiple_files",
+            "list_directory",
+            "list_directory_with_sizes",
+            "directory_tree",
+            "search_files",
+            "get_file_info",
+            "list_allowed_directories",
+            "search_repositories",
+            "get_file_contents",
+            "list_commits",
+            "list_issues",
+            "search_code",
+            "get_issue",
+            "get_pull_request",
+            "list_pull_requests",
+            "read_query",
+            "list_tables",
+            "describe_table",
+        ];
+        for n in read_only {
+            assert_eq!(classify(n), ToolSafety::ReadOnly, "{n} should pass");
+        }
+        let mutating = [
+            "write_file",
+            "edit_file",
+            "create_directory",
+            "move_file",
+            "create_or_update_file",
+            "create_repository",
+            "push_files",
+            "create_issue",
+            "create_pull_request",
+            "fork_repository",
+            "create_branch",
+            "update_issue",
+            "merge_pull_request",
+            "write_query",
+            "create_table",
+            "puppeteer_click",
+            "puppeteer_fill",
+            "puppeteer_evaluate",
+        ];
+        for n in mutating {
+            assert!(
+                classify(n).is_mutating(),
+                "ESCAPE: {n} should be intercepted"
             );
         }
     }
