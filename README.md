@@ -5,7 +5,7 @@
 [![Try it live](https://img.shields.io/badge/demo-run%20it%20in%20your%20browser-5ac8fa)](https://nlj.dev)
 
 > **Run the engine in your browser** → **[nlj.dev](https://nlj.dev)** (open the Kedge icon)
-> The real ReAct engine compiled to WebAssembly — deterministic Think → Act → Observe,
+> The real ReAct engine compiled to WebAssembly: deterministic Think → Act → Observe,
 > executing entirely client-side. No server, no API key, no network.
 
 A **deterministic, dry-run-first execution substrate for AI agents**, written in Rust.
@@ -14,17 +14,17 @@ Kedge sits between an LLM (a frontier API or local Ollama) and a real system, an
 gives you the two things that make an autonomous agent trustworthy:
 
 - **Preview, before.** In `--audit` mode, every *mutating* tool call the agent
-  makes is **intercepted and journaled instead of executed** — so you see exactly
+  makes is **intercepted and journaled instead of executed**, so you see exactly
   what the agent *would* do to your files, APIs, and data before anything happens.
   Read-only tools still run, so the agent reasons on real data.
 - **Audit & replay, after.** Every step is journaled to a **replayable SQLite
   ledger**, so you can reconstruct and re-run exactly what happened.
 
 All of it runs under **hard, enforceable budgets** (tokens, steps, wall-clock) in
-**one memory-safe static binary** — no Python runtime, no GC pauses, no GIL.
+**one memory-safe static binary**: no Python runtime, no GC pauses, no GIL.
 
 The design goal is *control and accountability*: preview before, audit after, and
-never run away. **Kedge is policy, not a sandbox** — it keeps an agent's chosen
+never run away. **Kedge is policy, not a sandbox**: it keeps an agent's chosen
 actions inside the bounds you set; for hard OS-level containment, run it inside a
 container or VM. See [SECURITY.md](SECURITY.md) for the exact threat model.
 
@@ -47,61 +47,61 @@ $ kedge run "assess the toolchain"
   replay with: kedge replay 4b7ef49c-… --db kedge.sqlite
 ```
 
-(That's the offline demo policy. Add `--model` to drive a real LLM — see below.)
+(That's the offline demo policy. Add `--model` to drive a real LLM; see below.)
 
 ## What it does
 
-The two features that carry the product — the **trust arc**:
+The two features that carry the product (the **trust arc**):
 
-- **Shadow-Guard — preview mutations before they happen** (`kedge run --audit`, the
+- **Shadow-Guard: preview mutations before they happen** (`kedge run --audit`, the
   default). Read-only tools execute for real so the agent reasons on real data, but
   every tool classified as *mutating* is **intercepted and journaled instead of
-  run** — nothing is written, sent, or called. You get the agent's intended side
+  run**: nothing is written, sent, or called. You get the agent's intended side
   effects before you ever let it act; `kedge audit` then prints a security scorecard
   + a measured token/cost report. *(Classification is fail-safe: anything not
   clearly read-only is treated as mutating.)*
-- **Deterministic replay ledger** — every step is journaled to an append-only
+- **Deterministic replay ledger**: every step is journaled to an append-only
   SQLite ledger; `kedge replay <id>` reconstructs the exact trajectory, so a run is
   re-runnable and auditable after the fact.
 
 Enforced around them:
 
-- **Hard budgets** — token, step, and wall-clock ceilings, checked *before* work
+- **Hard budgets**: token, step, and wall-clock ceilings, checked *before* work
   happens; an agent physically can't run away.
-- **Three guard modes, one boundary** — dry-run (`--audit`), human-approve
+- **Three guard modes, one boundary**: dry-run (`--audit`), human-approve
   (`--hitl`: journaled `y/N`, or remote via a webhook + the HTTP API), or block
   outright (`--deny` / `kedge-policy` blocked tools + PII redaction). **Safe by
   default:** `kedge run` shadow-audits unless you opt into `--live`.
-- **Crash recovery** (`kedge resume`) — continue an interrupted run from its last
+- **Crash recovery** (`kedge resume`): continue an interrupted run from its last
   journaled step, through the same guard chain, without re-executing already-
   performed actions.
-- **MCP client + server** (`kedge-mcp`) — consume external tools over JSON-RPC 2.0
+- **MCP client + server** (`kedge-mcp`): consume external tools over JSON-RPC 2.0
   (stdio + streamable HTTP), and expose Kedge's own tools to any MCP host.
-- **Bounded subagent mesh** (`kedge-mesh`) — spawn subagents in isolated Tokio
+- **Bounded subagent mesh** (`kedge-mesh`): spawn subagents in isolated Tokio
   tasks under hard budgets; a panic/timeout is contained, never touching the parent.
-- **HTTP control API** (`kedge serve`) — inspect runs and resolve HITL approvals
+- **HTTP control API** (`kedge serve`): inspect runs and resolve HITL approvals
   remotely (bearer-token auth required off loopback), so a dashboard/Slack/web UI
   can drive Kedge instead of a terminal.
 
-Bundled utilities (handy, not the headline — dedicated tools go deeper in each lane):
+Bundled utilities (handy, not the headline; dedicated tools go deeper in each lane):
 
-- **AST-aware compaction** (`kedge compact`) + a content-hashed cache — shrink a
+- **AST-aware compaction** (`kedge compact`) + a content-hashed cache: shrink a
   source file to a signatures-only skeleton to fit a token budget, and `kedge
   expand` a specific body back on demand.
-- **Verification loop** (`kedge verify` / `kedge-exec`) — run cargo/go/npm/pytest in
+- **Verification loop** (`kedge verify` / `kedge-exec`): run cargo/go/npm/pytest in
   an isolated subprocess (clean process-group teardown) and parse compiler
   diagnostics into a structured pass/fail the agent can react to.
-- **Regression gate** (`kedge eval`) — diff a run against a baseline ledger
+- **Regression gate** (`kedge eval`): diff a run against a baseline ledger
   (step/tool/token/drift metrics), emit JUnit + a CI exit code; local and
   deterministic, no LLM-judge spend.
 - **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge` →
   `pip install kedge-rt`), and an **experimental, observe-only eBPF/LSM prototype**
-  (`kedge-probe`, Linux — it logs, it does *not* enforce; see the crate docs).
+  (`kedge-probe`, Linux: it logs, it does *not* enforce; see the crate docs).
 
 ## Install
 
 **Prerequisites:** a recent stable [Rust toolchain](https://rustup.rs) and a C
-compiler (`cc`/`clang` on macOS/Linux, MSVC on Windows) — the Tree-sitter
+compiler (`cc`/`clang` on macOS/Linux, MSVC on Windows). The Tree-sitter
 grammar and bundled SQLite build a little native code. No network is required at
 runtime.
 
@@ -164,19 +164,19 @@ flowchart TD
 | **kedge-exec** | Tokio subprocess runner. Each child leads its own **process group**, so a timeout reaps the whole subtree (`killpg`). Auto-detects and runs the project's verifier (**cargo/go/npm/pytest**) with a cargo **diagnostic interceptor**. |
 | **kedge-ledger** | Append-only **SQLite** journal. Records each step live via the engine's observer hook and reconstructs a run's trajectory (`replay`). |
 | **kedge-llm** | A `Reasoner` over any **OpenAI-compatible** chat endpoint (OpenAI/Ollama/vLLM/LM Studio) that emits ReAct JSON parsed straight into the engine's `Action` type. |
-| **kedge-mesh** | Bounded subagent supervision — spawn children in isolated Tokio tasks under hard token/step/wall-clock bounds; panics/timeouts/runaways are contained and journaled, never touching the parent. |
-| **kedge-eval** | Event-sourced regression harness — profiles baseline vs candidate ledgers (step/tool/token/drift metrics), emits JUnit XML + CI exit codes. |
-| **kedge-cache** | Content-hashed (`sha256`) cache of deterministic AST compaction — never LLM responses. Unchanged file → cached skeleton, no re-parse. |
-| **kedge-policy** | Lightweight user-space guardrails from `kedge-policy.toml` (blocked tools, PII redaction, per-run budgets) — a native matcher, not OPA/Rego. |
+| **kedge-mesh** | Bounded subagent supervision: spawn children in isolated Tokio tasks under hard token/step/wall-clock bounds; panics/timeouts/runaways are contained and journaled, never touching the parent. |
+| **kedge-eval** | Event-sourced regression harness: profiles baseline vs candidate ledgers (step/tool/token/drift metrics), emits JUnit XML + CI exit codes. |
+| **kedge-cache** | Content-hashed (`sha256`) cache of deterministic AST compaction, never LLM responses. Unchanged file → cached skeleton, no re-parse. |
+| **kedge-policy** | Lightweight user-space guardrails from `kedge-policy.toml` (blocked tools, PII redaction, per-run budgets): a native matcher, not OPA/Rego. |
 | **kedge-audit** | Shadow-Guard dry-run interceptor + forensic report (intercepted mutations, measured token/cost). |
-| **kedge-probe** | **Experimental, observe-only** eBPF/LSM prototype (Linux) — it logs, it does *not* enforce, and it isn't wired into a normal run; portable no-op fallback elsewhere. The eBPF object is a separate, workspace-excluded crate. |
+| **kedge-probe** | **Experimental, observe-only** eBPF/LSM prototype (Linux): it logs, it does *not* enforce, and it isn't wired into a normal run; portable no-op fallback elsewhere. The eBPF object is a separate, workspace-excluded crate. |
 | **kedge** (bin) | `clap` CLI wiring it all together. |
 
 ### The ReAct engine
 
 The heart is a strict `Think → Act → Observe` cycle. An explicit `StateMachine`
 rejects any transition outside the cycle, and the shared `BudgetTracker` is
-**charged before any expensive work is done** — so exhaustion is detected
+**charged before any expensive work is done**, so exhaustion is detected
 deterministically, and the engine always returns a full trajectory even when it
 stops early.
 
@@ -205,8 +205,8 @@ policy so the whole pipeline runs offline.
 
 ## Driving a real model
 
-`--model` points the agent at any OpenAI-compatible chat endpoint — **Ollama,
-OpenAI, vLLM, LM Studio, llama.cpp**:
+`--model` points the agent at any OpenAI-compatible chat endpoint (**Ollama,
+OpenAI, vLLM, LM Studio, llama.cpp**):
 
 ```sh
 # Local Ollama (default base URL), built-in shell tool:
@@ -295,7 +295,7 @@ SQLite build native code). No network is needed to build or to run the demo path
 
 This is a Rust codebase built with an **AI-native workflow**: I drive an AI coding
 agent as a pair programmer and own the architecture, the design decisions, and the
-final review. AI is a tool in the loop, not the author of record — the value is
+final review. AI is a tool in the loop, not the author of record. The value is
 that one developer can direct it to ship and *maintain* a system this broad without
 the quality bar dropping. Concretely, where it was used:
 
@@ -303,7 +303,7 @@ the quality bar dropping. Concretely, where it was used:
   `Reasoner` trait, the budget model, the error taxonomy); the agent scaffolds
   implementations against them, and I review, refactor, and reject.
 - **Adversarial self-audit.** After each subsystem landed, the agent was tasked to
-  *attack its own code*. That surfaced real defects a happy-path pass would miss —
+  *attack its own code*. That surfaced real defects a happy-path pass would miss:
   an output-drain deadlock when a backgrounded child holds the pipe, a non-Unix
   timeout that never actually killed the child, an MCP reader/dispatch race, and
   a `verify` false-positive on non-cargo directories. Every one was fixed **with a
@@ -311,12 +311,12 @@ the quality bar dropping. Concretely, where it was used:
 - **Test generation.** The suite (unit + end-to-end CLI tests via `assert_cmd`)
   was written agent-first from stated invariants, then pruned by hand.
 - **CI as the backstop.** `cargo fmt`, `clippy -D warnings`, and the full test
-  suite run on Linux and macOS on every push — the machine-written code has to pass
+  suite run on Linux and macOS on every push; the machine-written code has to pass
   the same gate as anything else.
 
-The determinism goals of the tool itself (hard budgets, byte-identical replay)
-are also what make an AI-native workflow trustworthy here: every run is journaled
-and reproducible, so a change's effect is verifiable rather than vibes.
+The determinism goals of the tool itself (hard budgets, replay of a recorded run
+against a baseline) are also what make an AI-native workflow trustworthy here:
+every run is journaled, so a change's effect is verifiable rather than vibes.
 
 ## Status
 
@@ -327,13 +327,24 @@ auto-detects the project's build/test system; every command has `--json` output
 and a `kedge.toml`-configurable, pipe-safe CLI covered by end-to-end tests.
 A TUI and richer built-in tools are the remaining niceties.
 
+## Foreguard, extracted from this engine
+
+Kedge's fail-safe, deny-wins tool classifier is also published on its own as
+**[Foreguard](https://github.com/nlj3/foreguard)**, a dry-run trust layer that
+sits between any MCP host and its tool server: it previews each mutating tool
+call, tracks whether untrusted data is driving it, and asks a human before
+anything executes. It depends on `kedge-core` rather than forking it, so there
+is one source of truth for classification.
+
+Kedge is the substrate; Foreguard is the focused product built on it.
+
 ## License
 
-**[Business Source License 1.1](LICENSE)** (BUSL-1.1) — the same source-available
+**[Business Source License 1.1](LICENSE)** (BUSL-1.1): the same source-available
 model used by HashiCorp, MariaDB, CockroachDB, and Sentry.
 
 - **Free** to read, fork, modify, self-host, and use for any **non-commercial**
-  purpose — personal projects, research, evaluation, and internal non-revenue use.
+  purpose: personal projects, research, evaluation, and internal non-revenue use.
 - **Commercial / enterprise use requires a paid license.** If Kedge (or a
   derivative or hosted version) is used in or as part of a for-profit product,
   service, or internal system, contact **noeljacksonjs@gmail.com** for a
