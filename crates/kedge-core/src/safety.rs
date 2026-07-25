@@ -174,10 +174,6 @@ const MUTATING_VERBS: &[&str] = &[
 /// Note: this is still *name*-based and cannot see arguments. A generic tool like
 /// `fetch`/`request` that mutates via a `method` argument classifies read-only by
 /// name; declare such a tool's capability explicitly to gate it correctly.
-/// How far into a name a read verb may sit and still count: the verb itself, or
-/// the verb behind exactly one namespace prefix.
-const NAMESPACE_WINDOW: usize = 2;
-
 pub fn classify(tool_name: &str) -> ToolSafety {
     let tokens: Vec<String> = tool_name
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -194,26 +190,24 @@ pub fn classify(tool_name: &str) -> ToolSafety {
     if tokens.iter().any(|t| MUTATING_VERBS.contains(&t.as_str())) {
         return ToolSafety::Mutating { risk: Risk::Medium };
     }
-    // Read-only if a read verb sits at the head, or directly behind a single
-    // namespace prefix. MCP servers routinely namespace (`puppeteer_screenshot`,
-    // `github_get_file`), which pushes the real verb out of head position and made
-    // every such tool fail safe.
+    // Read-only ONLY if the head token is a read verb.
     //
-    // This cannot weaken deny-wins. Both checks above return early, so reaching
-    // this point already proves no dangerous token appears anywhere in the name;
-    // `get_and_delete` never arrives here. The window is deliberately two rather
-    // than unbounded, which is what keeps an *unrecognised* head honest:
-    // `frobnicate_and_get` still fails safe, because a read verb buried at
-    // position three is not evidence the tool reads.
-    if tokens
-        .iter()
-        .take(NAMESPACE_WINDOW)
-        .any(|t| READ_VERBS.contains(&t.as_str()))
-    {
-        ToolSafety::ReadOnly
-    } else {
+    // 0.3.0 briefly widened this to a two-token window so a namespace prefix
+    // (`puppeteer_screenshot`) would not hide the verb. Adversarial testing
+    // showed that inverted the engine's premise: a known-safe verb anywhere in
+    // the window validated whatever followed it, so `ns_get_frobnicate` and
+    // `x_get_nuke` were forwarded on names whose actual action is unknown. That
+    // turns a fail-safe default into a blocklist, which is precisely the thing
+    // this classifier exists not to be.
+    //
+    // Namespaces are a real problem, but they cannot be solved by guessing from
+    // a single name in isolation. It needs corroboration across a server's whole
+    // catalogue, which is context this stateless function does not have and
+    // should not acquire.
+    match tokens.first() {
+        Some(head) if READ_VERBS.contains(&head.as_str()) => ToolSafety::ReadOnly,
         // Unknown / empty → assume it can mutate. Safety over convenience.
-        ToolSafety::Mutating { risk: Risk::Medium }
+        _ => ToolSafety::Mutating { risk: Risk::Medium },
     }
 }
 
@@ -366,27 +360,45 @@ mod tests {
 mod ecosystem {
     use super::*;
 
-    /// The reason the namespace window exists at all.
+    /// The bypass that got the two-token window reverted in 0.3.1.
+    ///
+    /// The window let a known-safe verb validate whatever followed it, so a name
+    /// whose real action is unknown was forwarded: `ns_get_frobnicate`,
+    /// `x_get_nuke`. That converts a fail-safe default into a blocklist, which
+    /// is the opposite of what this classifier is for. These names must stay
+    /// mutating, permanently.
     #[test]
-    fn a_namespace_prefix_no_longer_hides_the_verb() {
+    fn a_read_verb_never_validates_an_unknown_suffix() {
         for name in [
-            "puppeteer_screenshot",
-            "github_get_file",
-            "slack_list_channels",
-            "myserver_read_page",
-            "notion_search_pages",
-            "directory_tree",
+            "ns_get_frobnicate",
+            "ns_read_obliterate",
+            "x_get_nuke",
+            "svc_list_purge",
+            "api_search_incinerate",
+            "prefix_fetch_unknownaction",
         ] {
-            assert_eq!(
-                classify(name),
-                ToolSafety::ReadOnly,
-                "{name} reads; a namespace prefix should not make it mutating"
+            assert!(
+                classify(name).is_mutating(),
+                "BYPASS: {name} has an unknown action behind a read verb and must fail safe"
             );
         }
     }
 
-    /// The window must not become a bypass. Deny-wins runs first, so a dangerous
-    /// token anywhere still wins no matter where a read verb sits.
+    /// The cost of that revert, recorded honestly rather than hidden. Namespaced
+    /// read-only tools are false positives again until Foreguard can corroborate
+    /// a prefix across a server's whole catalogue. A false positive is noise; the
+    /// bypass was a hole.
+    #[test]
+    fn namespaced_reads_are_knowingly_false_positive() {
+        for name in ["puppeteer_screenshot", "github_get_file", "directory_tree"] {
+            assert!(
+                classify(name).is_mutating(),
+                "{name} is expected to fail safe while namespace handling lives elsewhere"
+            );
+        }
+    }
+
+    /// Deny-wins is untouched by any of this.
     #[test]
     fn the_window_never_defeats_deny_wins() {
         for name in [
@@ -404,10 +416,9 @@ mod ecosystem {
         }
     }
 
-    /// A read verb buried past the namespace window is not evidence of a read.
-    /// An unrecognised head still fails safe.
+    /// An unrecognised head still fails safe regardless of what follows.
     #[test]
-    fn a_read_verb_beyond_the_window_does_not_rescue_an_unknown_name() {
+    fn a_read_verb_beyond_the_head_does_not_rescue_an_unknown_name() {
         for name in [
             "frobnicate_and_get",
             "nuke_the_thing_list",
@@ -415,7 +426,7 @@ mod ecosystem {
         ] {
             assert!(
                 classify(name).is_mutating(),
-                "{name} has an unrecognised head; a distant read verb must not downgrade it"
+                "{name} has an unrecognised head; a later read verb must not downgrade it"
             );
         }
     }
@@ -423,7 +434,7 @@ mod ecosystem {
     /// Vocabulary additions, and the ones deliberately left out.
     #[test]
     fn newly_recognised_read_verbs() {
-        for name in ["screenshot", "echo", "tree", "puppeteer_screenshot"] {
+        for name in ["screenshot", "echo", "tree"] {
             assert_eq!(classify(name), ToolSafety::ReadOnly, "{name} is read-only");
         }
         // Ambiguous on purpose: these can write, so they stay fail-safe and are
@@ -446,7 +457,6 @@ mod ecosystem {
             "read_multiple_files",
             "list_directory",
             "list_directory_with_sizes",
-            "directory_tree",
             "search_files",
             "get_file_info",
             "list_allowed_directories",
