@@ -299,6 +299,7 @@ mod tests {
             escapes_root: false,
             truncated: false,
             files_scanned: 100,
+            wildcard_grants: 0,
         }
     }
 

@@ -22,8 +22,17 @@
 //!   manifest from being scored as a reduction at all.
 //! - **[`Reach::truncated`] denies.** Past `MAX_WALK` the counts are lower
 //!   bounds, and an unknown is not an improvement.
-//! - **Reduction must hold in every dimension.** Halving writable files while
-//!   adding one command is a trade, not a reduction.
+//! - **A wildcard grant is never a reduction of a literal one**, even when both
+//!   reach the same file count today. `write = ["/repo/**"]` and
+//!   `write = ["/repo/a.rs"]` are identical in a directory holding one file, and
+//!   diverge the moment a file is added — only one of them gained authority
+//!   without anyone editing it.
+//!
+//! Commands and hosts are **reported here and compared elsewhere**. There is no
+//! finite command set to walk, and counting allow-entries gets the direction
+//! backwards: `["cargo"]` is one entry permitting every subcommand. The
+//! promotion gate compares those by containment, using the manifests this type
+//! does not hold.
 //!
 //! The measurement is **filesystem-dependent** by design — authority *is*
 //! contextual — which means a `Reach` is only comparable to another `Reach`
@@ -48,12 +57,22 @@ pub struct Reach {
     pub writable: usize,
     /// Files under the root the manifest would permit reading.
     pub readable: usize,
-    /// Distinct command allow-entries. A count, not an enumeration — there is
-    /// no finite set of commands to walk, so this is a weaker signal and the
-    /// docs say so rather than pretending otherwise.
+    /// Distinct command allow-entries. **Reported, never compared.** There is no
+    /// finite command set to enumerate, and counting entries gets the direction
+    /// backwards: `["cargo"]` is one entry permitting every subcommand, while
+    /// `["cargo check", "cargo test"]` is two permitting strictly less.
+    /// Containment is the promotion gate's job — it has both manifests.
     pub commands: usize,
-    /// Distinct network allow-entries. Same caveat as `commands`.
+    /// Distinct network allow-entries. Reported, never compared, same reason.
     pub hosts: usize,
+    /// Filesystem grants containing an unescaped wildcard.
+    ///
+    /// A point-in-time file count cannot tell `write = ["/repo/a.rs"]` from
+    /// `write = ["/repo/**"]` in a directory holding one file — both reach
+    /// exactly one. They diverge the moment a file is added, and only one of
+    /// them gained authority without anyone editing it. Counting wildcards is
+    /// how that unbounded future authority stays visible.
+    pub wildcard_grants: usize,
     /// A grant matches somewhere outside the root.
     pub escapes_root: bool,
     /// The walk hit [`MAX_WALK`]; `writable`/`readable` are lower bounds.
@@ -63,16 +82,19 @@ pub struct Reach {
 }
 
 impl Reach {
-    /// Whether `self` is a genuine reduction of `other`.
+    /// Whether `self` is a genuine filesystem reduction of `other`.
     ///
-    /// Requires: no dimension larger, at least one strictly smaller, no escape,
-    /// and no truncation on either side.
+    /// Requires: no more writable files, no more readable files, no more
+    /// wildcard grants, at least one of those strictly smaller, no escape, and
+    /// no truncation on either side.
     ///
-    /// "At least one strictly smaller" rather than "smaller everywhere" because
-    /// a skill that needs the same two commands but a tenth of the files has
-    /// genuinely reduced authority. "No dimension larger" is the part that
-    /// stops a trade from counting.
-    pub fn is_reduction_of(&self, other: &Reach) -> bool {
+    /// **Named for what it actually covers.** Commands and hosts are *not*
+    /// compared here, because `Reach` holds only counts and counting command
+    /// entries gets the direction backwards — `["cargo"]` is one entry
+    /// permitting every subcommand. The gate compares those by containment,
+    /// using the manifests it has and this type does not. An earlier version
+    /// silently included them and called a strictly narrower skill a widening.
+    pub fn is_filesystem_reduction_of(&self, other: &Reach) -> bool {
         // An unknown is not an improvement.
         if self.truncated || other.truncated {
             return false;
@@ -84,12 +106,10 @@ impl Reach {
         }
         let no_worse = self.writable <= other.writable
             && self.readable <= other.readable
-            && self.commands <= other.commands
-            && self.hosts <= other.hosts;
+            && self.wildcard_grants <= other.wildcard_grants;
         let somewhere_better = self.writable < other.writable
             || self.readable < other.readable
-            || self.commands < other.commands
-            || self.hosts < other.hosts;
+            || self.wildcard_grants < other.wildcard_grants;
         no_worse && somewhere_better
     }
 
@@ -134,6 +154,11 @@ pub fn reach(manifest: &Manifest, root: &Path) -> std::io::Result<Reach> {
         escapes_root: escapes_root(manifest, root),
         truncated: false,
         files_scanned: 0,
+        wildcard_grants: manifest
+            .declared()
+            .iter()
+            .filter(|(kind, pattern)| kind.starts_with("filesystem.") && has_wildcard(pattern))
+            .count(),
     };
 
     for (kind, _) in manifest.declared() {
@@ -210,6 +235,22 @@ fn escapes_root(manifest: &Manifest, root: &Path) -> bool {
         .into_iter()
         .filter(|(kind, _)| kind.starts_with("filesystem."))
         .any(|(_, pattern)| !head_is_inside(&pattern, root))
+}
+
+/// Whether a pattern contains an **unescaped** wildcard.
+///
+/// `\*` is a literal asterisk in a filename, not a grant over everything.
+fn has_wildcard(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '*' | '?' => return true,
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn head_is_inside(pattern: &str, root: &Path) -> bool {
@@ -307,8 +348,8 @@ mod tests {
         assert_eq!(w.files_scanned, 4, "`.git` was not skipped");
         assert_eq!(w.writable, 4);
         assert_eq!(n.writable, 1);
-        assert!(n.is_reduction_of(&w));
-        assert!(!w.is_reduction_of(&n));
+        assert!(n.is_filesystem_reduction_of(&w));
+        assert!(!w.is_filesystem_reduction_of(&n));
     }
 
     #[test]
@@ -323,7 +364,7 @@ mod tests {
         let r = reach(&escaping, d.path()).unwrap();
         assert!(r.escapes_root);
         assert_eq!(r.writable, 0, "it really does look tight by count");
-        assert!(!r.is_reduction_of(&reach(&wide(d.path()), d.path()).unwrap()));
+        assert!(!r.is_filesystem_reduction_of(&reach(&wide(d.path()), d.path()).unwrap()));
 
         // And a bare `**`, whose head is empty.
         let bare = compile(
@@ -338,20 +379,23 @@ mod tests {
         let d = tree();
         let mut a = reach(&narrow(d.path()), d.path()).unwrap();
         let b = reach(&wide(d.path()), d.path()).unwrap();
-        assert!(a.is_reduction_of(&b));
+        assert!(a.is_filesystem_reduction_of(&b));
 
         a.truncated = true;
-        assert!(!a.is_reduction_of(&b), "an unknown was scored as better");
+        assert!(
+            !a.is_filesystem_reduction_of(&b),
+            "an unknown was scored as better"
+        );
 
         let mut b2 = b;
         b2.truncated = true;
         assert!(!reach(&narrow(d.path()), d.path())
             .unwrap()
-            .is_reduction_of(&b2));
+            .is_filesystem_reduction_of(&b2));
     }
 
     #[test]
-    fn trading_files_for_a_command_is_not_a_reduction() {
+    fn commands_are_not_compared_here_but_wildcards_are() {
         let base = Reach {
             writable: 100,
             readable: 100,
@@ -360,27 +404,40 @@ mod tests {
             escapes_root: false,
             truncated: false,
             files_scanned: 100,
+            wildcard_grants: 1,
         };
-        let traded = Reach {
+        // Red-team A3: MORE command entries is not more authority, and this
+        // type must not claim otherwise. Commands are the gate's business.
+        let more_commands = Reach {
             writable: 3,
             readable: 3,
-            commands: 2, // one more
+            commands: 2,
             ..base
         };
-        assert!(!traded.is_reduction_of(&base));
+        assert!(
+            more_commands.is_filesystem_reduction_of(&base),
+            "command entry count leaked back into the filesystem comparison"
+        );
 
-        let honest = Reach {
-            commands: 1,
-            ..traded
+        // Red-team A4: a wildcard grant is unbounded future authority even when
+        // it reaches the same number of files today.
+        let same_files_but_globbed = Reach {
+            writable: 3,
+            readable: 3,
+            wildcard_grants: 2,
+            ..base
         };
-        assert!(honest.is_reduction_of(&base));
+        assert!(!same_files_but_globbed.is_filesystem_reduction_of(&base));
     }
 
     #[test]
     fn an_identical_manifest_is_not_a_reduction_of_itself() {
         let d = tree();
         let r = reach(&narrow(d.path()), d.path()).unwrap();
-        assert!(!r.is_reduction_of(&r), "equal must not count as better");
+        assert!(
+            !r.is_filesystem_reduction_of(&r),
+            "equal must not count as better"
+        );
     }
 
     #[test]

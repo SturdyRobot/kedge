@@ -348,10 +348,14 @@ pub fn render<'a>(
 
     for cap in caps {
         match cap {
-            Capability::FsRead(p) => read.insert(p.to_string_lossy().into_owned()),
-            Capability::FsWrite(p) => write.insert(p.to_string_lossy().into_owned()),
+            Capability::FsRead(p) => read.insert(escape_glob(&p.to_string_lossy())),
+            Capability::FsWrite(p) => write.insert(escape_glob(&p.to_string_lossy())),
+            // Commands match on argv token boundaries, not as globs, so they
+            // are emitted verbatim.
             Capability::Process(c) => process.insert(c.clone()),
-            Capability::Network(u) => network.insert(host_of(u).unwrap_or_else(|| u.clone())),
+            Capability::Network(u) => {
+                network.insert(escape_glob(&host_of(u).unwrap_or_else(|| u.clone())))
+            }
             Capability::Secret(k) => secrets.insert(k.clone()),
         };
     }
@@ -379,6 +383,22 @@ pub fn render<'a>(
             out.push_str(&format!("\n[capabilities.{section}]\n"));
             out.push_str(&list("allow", set));
         }
+    }
+    out
+}
+
+/// Escape glob metacharacters so a literal subject stays literal.
+///
+/// Filenames may legally contain `*` and `?`. Emitting them raw produced a
+/// manifest granting *more* than was observed — and verification could not
+/// catch it, because the observed path still matched the widened pattern.
+fn escape_glob(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
     }
     out
 }

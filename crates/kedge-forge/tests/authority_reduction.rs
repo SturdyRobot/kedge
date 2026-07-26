@@ -71,7 +71,7 @@ async fn every_learned_manifest_reduces_authority_against_the_general_agent() {
         let l = reach(&learned, &ws.root).expect("reach learned");
         let g = reach(&general, &ws.root).expect("reach general");
 
-        if !l.is_reduction_of(&g) {
+        if !l.is_filesystem_reduction_of(&g) {
             not_reduced.push(format!(
                 "  {}\n      general: {}\n      learned: {}",
                 task.id,

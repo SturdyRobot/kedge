@@ -8,7 +8,15 @@
 //! | `**`    | any sequence of characters, including `/`      |
 //! | `*`     | any sequence of characters, **except** `/`     |
 //! | `?`     | exactly one character, except `/`              |
+//! | `\\x`   | the character `x`, literally — even `*` or `?` |
 //! | *other* | itself, literally (regex-escaped)              |
+//!
+//! The escape exists because filenames may legally contain `*` and `?`, and a
+//! manifest minimized from a run that touched `report[1]*draft.md` was emitting
+//! that path unescaped — producing a grant that also covered
+//! `report[1]SECRETdraft.md`. The round-trip check could not see it, because the
+//! observed file still matched. A minimizer that silently widens is worse than
+//! no minimizer.
 //!
 //! Patterns are anchored at both ends: `/repo/**` matches `/repo/src/main.rs`
 //! but not `/repository/x` and not `/repo` itself.
@@ -69,6 +77,12 @@ fn translate(pattern: &str) -> String {
                 out.push_str("[^/]");
                 i += 1;
             }
+            // `\x` is a literal `x`, whatever `x` is. A trailing lone `\` is a
+            // literal backslash.
+            '\\' if i + 1 < bytes.len() => {
+                out.push_str(&regex::escape(&bytes[i + 1].to_string()));
+                i += 2;
+            }
             c => {
                 // Escape everything else. `regex::escape` on a single char is
                 // exact and leaves no metacharacter unescaped.
@@ -124,6 +138,21 @@ mod tests {
         // is what makes this visible rather than accidental.
         assert!(m("**", "/etc/passwd"));
         assert!(m("**", "/repo/src/main.rs"));
+    }
+
+    #[test]
+    fn an_escaped_wildcard_is_a_literal_character() {
+        // Red-team A2. A real file may be named this.
+        assert!(m(r"/repo/report[1]\*draft.md", "/repo/report[1]*draft.md"));
+        assert!(!m(
+            r"/repo/report[1]\*draft.md",
+            "/repo/report[1]SECRETdraft.md"
+        ));
+        assert!(m(r"/repo/a\?b", "/repo/a?b"));
+        assert!(!m(r"/repo/a\?b", "/repo/aXb"));
+        // A backslash that escapes nothing in particular is still a backslash.
+        assert!(m(r"/repo/a\b", "/repo/ab"));
+        assert!(m("/repo/trailing\\", "/repo/trailing\\"));
     }
 
     #[test]

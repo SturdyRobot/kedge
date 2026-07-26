@@ -76,12 +76,21 @@ async fn a_recorded_run_becomes_a_promoted_least_privilege_skill() {
         let general_reach = reach(&general, &ws.root).expect("reach");
 
         // 4. Store both — the baseline as the parent, so lineage is real.
+        //
+        // Red-team A6: this used to be built with `from_observation`, which sets
+        // `manifest_toml` to the *learned* manifest. The record therefore had
+        // general-agent reach numbers attached to a tight manifest, and the
+        // gate's containment check compared the candidate's commands against
+        // its own. The test passed for the wrong reason. The baseline now
+        // carries the general-agent manifest it claims to be.
         let baseline_record = SkillRecord {
-            name: task.id.to_string(),
-            version: "0.0.0-general".into(),
-            reach: general_reach,
+            manifest_toml: general_agent_manifest(&ws.root, &["cargo"]),
             ..SkillRecord::from_observation(&observed, task.id, "0.0.0-general", general_reach)
         };
+        assert!(
+            baseline_record.manifest_toml.contains("/**"),
+            "A6 REGRESSION: the baseline is not a general-agent manifest"
+        );
         registry
             .insert_candidate(&baseline_record)
             .expect("insert baseline");

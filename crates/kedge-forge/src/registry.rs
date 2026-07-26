@@ -151,9 +151,9 @@ impl Registry {
     pub fn insert_candidate(&self, rec: &SkillRecord) -> Result<SkillId, RegistryError> {
         self.conn.execute(
             "INSERT INTO skills (id, name, version, parent, manifest_toml, origin_run,
-                 writable, readable, commands, hosts, escapes_root, truncated, files_scanned,
-                 violations, indeterminate, promoted)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0)",
+                 writable, readable, commands, hosts, wildcard_grants, escapes_root,
+                 truncated, files_scanned, violations, indeterminate, promoted)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0)",
             params![
                 rec.id.to_string(),
                 rec.name,
@@ -165,6 +165,7 @@ impl Registry {
                 rec.reach.readable as i64,
                 rec.reach.commands as i64,
                 rec.reach.hosts as i64,
+                rec.reach.wildcard_grants as i64,
                 rec.reach.escapes_root as i64,
                 rec.reach.truncated as i64,
                 rec.reach.files_scanned as i64,
@@ -330,8 +331,8 @@ fn verdict_detail(v: &GateVerdict) -> String {
 }
 
 const COLUMNS: &str = "id, name, version, parent, manifest_toml, origin_run,
-     writable, readable, commands, hosts, escapes_root, truncated, files_scanned,
-     violations, indeterminate, promoted";
+     writable, readable, commands, hosts, wildcard_grants, escapes_root, truncated,
+     files_scanned, violations, indeterminate, promoted";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRecord> {
     let parse_uuid = |s: String| Uuid::parse_str(&s).unwrap_or(Uuid::nil());
@@ -349,13 +350,14 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRecord> {
             readable: row.get::<_, i64>(7)? as usize,
             commands: row.get::<_, i64>(8)? as usize,
             hosts: row.get::<_, i64>(9)? as usize,
-            escapes_root: row.get::<_, i64>(10)? != 0,
-            truncated: row.get::<_, i64>(11)? != 0,
-            files_scanned: row.get::<_, i64>(12)? as usize,
+            wildcard_grants: row.get::<_, i64>(10)? as usize,
+            escapes_root: row.get::<_, i64>(11)? != 0,
+            truncated: row.get::<_, i64>(12)? != 0,
+            files_scanned: row.get::<_, i64>(13)? as usize,
         },
-        violations: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-        indeterminate: row.get::<_, i64>(14)? as usize,
-        promoted: row.get::<_, i64>(15)? != 0,
+        violations: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+        indeterminate: row.get::<_, i64>(15)? as usize,
+        promoted: row.get::<_, i64>(16)? != 0,
     })
 }
 
@@ -371,6 +373,7 @@ CREATE TABLE IF NOT EXISTS skills (
     readable      INTEGER NOT NULL,
     commands      INTEGER NOT NULL,
     hosts         INTEGER NOT NULL,
+    wildcard_grants INTEGER NOT NULL,
     escapes_root  INTEGER NOT NULL,
     truncated     INTEGER NOT NULL,
     files_scanned INTEGER NOT NULL,
@@ -407,6 +410,7 @@ mod tests {
             escapes_root: false,
             truncated: false,
             files_scanned: 100,
+            wildcard_grants: 0,
         }
     }
 
