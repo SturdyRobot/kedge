@@ -24,7 +24,15 @@ members = ["crates/*"]
 # needs a nightly toolchain + bpf-linker. Excluded so the normal workspace build
 # (and CI) stays kernel-free and cross-platform. Build it separately — see
 # crates/kedge-probe/BUILD_EBPF.md.
-exclude = ["crates/kedge-probe-ebpf", "crates/kedge-bridge", "crates/kedge-web"]
+exclude = [
+    "crates/kedge-probe-ebpf",
+    "crates/kedge-bridge",
+    "crates/kedge-web",
+    # Bench fixtures are broken on purpose and compiled in isolation. Each is
+    # its own workspace root; excluding them here too keeps `cargo test
+    # --workspace` from ever adopting a deliberately-failing crate.
+    "crates/kedge-bench/fixtures",
+]
 resolver = "2"
 
 [workspace.package]

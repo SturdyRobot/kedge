@@ -1,0 +1,9 @@
+[package]
+name = "slug"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[workspace]

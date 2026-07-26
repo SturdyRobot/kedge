@@ -1,0 +1,22 @@
+[package]
+name = "kedge-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A reproducible repair-task suite that generates kedge trajectories. The corpus Forge learns from."
+publish = false
+
+[dependencies]
+kedge-core = { workspace = true }
+kedge-ledger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

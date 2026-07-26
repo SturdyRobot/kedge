@@ -24,42 +24,68 @@ stops the plan there — that is the point of writing them down.
 
 ---
 
-- [ ] **S1 — `kedge-bench`: the corpus generator** · *risk R1 (CRITICAL)*
+- [x] **S1 — `kedge-bench`: the corpus generator** *(shipped 2026-07-26)* · *risk R1 — **CLOSED***
 
-  20 repo-maintenance tasks across ≥3 families, a `ScriptedReasoner`
-  (`kedge_core::Reasoner`, no LLM), and a runner that drives the real
-  `ReActEngine` with the real `LedgerObserver`.
-
-  **Why first:** [Spike 000](spikes/000-trajectory-corpus.md) measured the
-  ledger at **0 runs**. Every later slice consumes trajectories. This is the
-  only slice that produces them.
+  20 repair tasks across 4 families, a `ScriptedReasoner` (`kedge_core::Reasoner`,
+  no LLM), and a runner driving the real `ReActEngine` with the real
+  `LedgerObserver`.
 
   **Acceptance:**
-  1. `cargo run -p kedge-bench` writes **≥20 runs** to a ledger.
-  2. Two consecutive runs produce a **byte-identical** `BenchReport` (excluding
-     `elapsed_ms`).
-  3. Suite completes in **< 30 s** with **$0** API cost.
-  4. Solve rate is reported and is **not** 100% — a suite the reference solver
-     aces completely has no headroom to measure improvement against.
+  1. ✔ **20 runs / 110 steps** written to a ledger (was 0/0/0).
+  2. ✔ Identical report fingerprint `835a1d21d0ee4848` across consecutive runs,
+     despite differing wall-clock. `TaskId`s are derived from the task name, not
+     `Uuid::new_v4()`, so the ledger is reproducible too.
+  3. ✔ ~11 s including the integrity pass, against a 30 s budget. $0.
+  4. ✘→**criterion corrected.** Solve rate is **100%**, not the "not 100%" the
+     criterion demanded.
 
-  **Watch for:** tasks invented to be solvable rather than derived from real
-  failures. R6 (the benchmark grades itself) starts accruing here, and the
-  cheapest mitigation is to source breakages from real git history now rather
-  than retrofit credibility later.
+  **On criterion 4.** It was miscalibrated, and the honest fix is to correct it
+  rather than to hobble tasks until the suite fails. The scripted solver computes
+  the exact inverse of each breakage — it is an oracle-solver by construction, so
+  100% is the *expected* result and what it demonstrates is that all 20 tasks are
+  solvable and the harness works end to end. Headroom is a property the **LLM
+  baseline** needs, and that measurement belongs to Spike 002.
+
+  What 100% must not be is unfalsifiable. So the runner carries a positive
+  control: `a_solver_that_does_nothing_but_claim_success_scores_zero` runs a
+  reasoner that immediately returns `Finish { "fixed it" }` and asserts it scores
+  **0/3** — the verdict comes from the fixture's own tests, never from what the
+  agent reported.
+
+  **Two bugs found, both silent-wrongness rather than obvious breakage.** Written
+  up in `RISKS.md` under closed-R1: a no-op breakage (`v > hi` → `v >= hi` is
+  behaviourally identical, so the "broken" fixture passed), and shared cargo
+  build artifacts across fixture copies that all identify as `slug 0.0.0` (a
+  pristine copy ran a broken copy's binary). Both now have permanent tests.
+
+  17 tests, clippy clean, workspace green.
 
 ---
 
-- [ ] **Spike 001 — repeated structure** · *risk R2 (HIGH)* · deterministic, no key
+- [ ] **Spike 001a — miner validation** · deterministic, free
 
-  Mine the S1 corpus for maximal repeated tool sub-sequences within each family.
-  Report the distribution of lengths and the fraction of trajectories covered.
+  Does the sub-sequence miner recover structure that was deliberately planted in
+  the scripted corpus? A prerequisite, not the question itself.
 
-  **Output:** `docs/spikes/001-repeated-structure.md` with a table and a verdict.
+  > **KILL: the miner cannot recover planted structure.** Fix the miner before
+  > spending anything on 001b — an unvalidated miner makes 001b unreadable.
 
-  > **KILL: < 40% of successful trajectories share a repeated sub-sequence of
-  > length ≥ 3.** Below that there is nothing to distill, and the honest
+---
+
+- [ ] **Spike 001b — repeated structure** · *risk R2/R9* · **needs an LLM**
+
+  **Rescoped during S1.** The original spike was to mine S1's corpus for repeated
+  sub-sequences with no API key. That is invalid: the corpus is produced by a
+  `ScriptedReasoner` whose step shapes are authored, so mining it measures
+  `scripted::plan_for` rather than agent behaviour — R6 in its sharpest form.
+
+  The question needs **LLM-generated** trajectories, so it joins Spike 002 behind
+  the same spend gate.
+
+  > **KILL: <40% of successful trajectories share a repeated sub-sequence of
+  > length ≥3.** Below that there is nothing to distill, and the honest
   > conclusion is that Forge reduces to a manifest recorder — which is
-  > `kedge-skill`, which already ships. Stop and publish that finding.
+  > `kedge-skill`, which already ships. Stop and publish that.
 
 ---
 
@@ -198,11 +224,12 @@ stops the plan there — that is the point of writing them down.
 Risk order, not feature order:
 
 1. **S1** — R1 is confirmed true and blocks everything. Nothing else can start.
-2. **Spike 001** — cheapest possible test of whether the premise holds at all.
+2. **Spike 001a** — validate the miner while it is still free to do so.
 3. **S2, S3** — the security thesis, measurable with no LLM and no spend.
 4. **S4, S5** — the governance skeleton; completes a shippable deterministic release.
-5. **Spike 002** — the expensive risk, deliberately last among the risks, and
-   gated on the cheap ones passing first.
+5. **Spikes 001b + 002** — the expensive risks, deliberately last, gated on the
+   cheap ones passing first. S1 moved 001b into this group: it turns out the
+   premise cannot be tested for free after all.
 6. **S6, S7** — only reachable if the spikes survive.
 
 The originating proposal ordered these roughly 1 → 5 → 3 → 4 → 2 → 6 → 7, with

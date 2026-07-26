@@ -7,22 +7,33 @@ Severity is *impact if true*, not likelihood.
 
 ---
 
-## R1 — No trajectory corpus · **CRITICAL** · **CONFIRMED TRUE**
+## R9 — A scripted corpus cannot answer Spike 001 · **HIGH** · open · *new*
 
-Forge consumes recorded successful executions. There are none.
+Found while building S1, and it corrects the slice ordering.
 
-**Evidence:** [Spike 000](spikes/000-trajectory-corpus.md). `kedge.sqlite` has
-0 runs, 0 steps, 0 events. No eval suite, no benchmark, no fixtures.
+Spike 001 asks whether successful trajectories share extractable repeated
+structure. `kedge-bench`'s corpus is produced by a `ScriptedReasoner` whose step
+shapes are **authored**. Mining it for repeated structure measures
+`scripted::plan_for`, not agent behaviour. The answer would be whatever was
+written, and it would look like a finding.
 
-**Impact:** Every downstream component has no input. Any before/after number is
-unmeasurable in both directions.
+This is R6 (the benchmark grades itself) in its sharpest form, and it means
+Spike 001 as originally scoped is **not answerable with the corpus S1 produces**.
 
-**Mitigation:** Slice 1 is `kedge-bench` — a fixed suite of repo-maintenance
-tasks with a **deterministic scripted solver**, producing a reproducible corpus
-at zero API cost. See [ADR-0002](adr/0002-benchmark-before-distiller.md).
+**Resolution — split the spike:**
 
-**Closes when:** `kedge-bench` writes ≥20 runs to a ledger and the run is
-byte-reproducible across two invocations.
+- **001a — miner validation.** Does the sub-sequence miner recover structure that
+  was deliberately planted? Deterministic, free, valid on a scripted corpus,
+  and a genuine prerequisite: an unvalidated miner would make 001b unreadable.
+- **001b — the actual question.** Does structure exist in *LLM-generated*
+  trajectories? Needs an LLM, so it joins Spike 002 behind the same spend gate.
+
+The kill criterion (<40% coverage) moves to **001b**. 001a has its own: if the
+miner cannot recover planted structure, fix the miner before spending anything.
+
+**Mitigation already in place:** `plan_for` varies step shapes per family, and
+`scripted::plans_are_not_all_the_same_shape` asserts ≥4 distinct shapes — so the
+corpus is at least not degenerate. That is damage control, not validity.
 
 ---
 
@@ -36,12 +47,12 @@ which test fails, and which fix applies. The *shape* may repeat (inspect →
 test → patch → re-test) while no concrete sub-sequence does. A shape is not
 something the deterministic observer can extract.
 
-**Spike:** 001, deterministic, no API key. Mine the corpus for maximal repeated
-tool sub-sequences across runs in a family; report the distribution of lengths
-and coverage.
+**Spike:** split into 001a/001b — see **R9**. The deterministic half validates
+the miner on the scripted corpus; the question itself needs LLM trajectories and
+is gated behind the same spend decision as Spike 002.
 
 **Kill threshold:** <40% of successful trajectories share a repeated
-sub-sequence of length ≥3.
+sub-sequence of length ≥3, measured on **001b**.
 
 ---
 
@@ -133,6 +144,34 @@ BRIEF.
 
 ---
 
+---
+
 ## Closed risks
 
-*(none yet)*
+### R1 — No trajectory corpus · **CRITICAL** · **CLOSED 2026-07-26**
+
+Was: `kedge.sqlite` had 0 runs, 0 steps, 0 events
+([Spike 000](spikes/000-trajectory-corpus.md)), so every Forge component had no
+input and every before/after number was unmeasurable in both directions.
+
+**Closed by:** `kedge-bench` (S1). `cargo run -p kedge-bench` now writes
+**20 runs / 110 steps** across 4 families, in ~11s, at $0, with an identical
+report fingerprint (`835a1d21d0ee4848`) across consecutive invocations.
+
+**What the slice cost, and what it bought:** two real bugs, both of which would
+have silently produced a wrong corpus rather than an obviously broken one.
+
+1. **A no-op breakage.** `clamp_upper`'s `v > hi` → `v >= hi` is behaviourally
+   identical; the "broken" fixture passed. A task that is already solved reports
+   as *solved*, which looks like success. Caught by a negative control before
+   any code was written.
+2. **Shared build artifacts.** One `CARGO_TARGET_DIR` across the suite —
+   measured at 0.10s/task against 0.15s isolated — made every fixture copy
+   resolve to the same cargo artifact, because they all identify as
+   `slug 0.0.0`. A pristine copy executed a previously-broken copy's binary and
+   reported `FAILED`. Wrong in both directions. The first fix (key on task id)
+   was still wrong: concurrent tests using the same id collided again. Keyed on
+   workspace path now.
+
+Both are permanent tests: `checks::every_breakage_actually_breaks` and
+`checks::a_broken_task_does_not_contaminate_the_next_task_on_the_same_fixture`.
