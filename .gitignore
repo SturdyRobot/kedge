@@ -12,3 +12,4 @@ crates/kedge-bridge/Cargo.lock
 
 # macOS Finder droppings
 .DS_Store
+.DS_Store
