@@ -1,0 +1,23 @@
+[package]
+name = "kedge-forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Learn what a task actually needed: derive a least-privilege capability manifest from a recorded agent trajectory."
+keywords = ["agent", "capability", "least-privilege", "security", "ai"]
+categories = ["development-tools"]
+
+[dependencies]
+kedge-core = { workspace = true }
+kedge-skill = { workspace = true }
+kedge-ledger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+kedge-bench = { path = "../kedge-bench" }

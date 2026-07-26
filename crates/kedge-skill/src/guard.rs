@@ -99,51 +99,12 @@ impl Conformance {
     /// Every entry is a literal subject that was actually used — no clustering,
     /// no inferred prefixes. Widening it back into globs is a judgement call
     /// with real security consequences, so it stays a human's to make.
+    ///
+    /// Delegates to [`crate::manifest::render`], the single emitter shared with
+    /// `kedge-forge`'s trajectory observer, so a manifest derived from a live
+    /// run and one derived from that run replayed out of a ledger are identical.
     pub fn minimized(&self, name: &str, version: &str) -> String {
-        let mut read = BTreeSet::new();
-        let mut write = BTreeSet::new();
-        let mut process = BTreeSet::new();
-        let mut network = BTreeSet::new();
-        let mut secrets = BTreeSet::new();
-
-        for cap in self.exercised.keys() {
-            match cap {
-                Capability::FsRead(p) => read.insert(p.to_string_lossy().into_owned()),
-                Capability::FsWrite(p) => write.insert(p.to_string_lossy().into_owned()),
-                Capability::Process(c) => process.insert(c.clone()),
-                Capability::Network(u) => {
-                    network.insert(crate::manifest::host_for_report(u).unwrap_or_else(|| u.clone()))
-                }
-                Capability::Secret(k) => secrets.insert(k.clone()),
-            };
-        }
-
-        let mut out = format!(
-            "# Minimized from an observed run: every entry below was exercised.\n\
-             [skill]\nname    = \"{name}\"\nversion = \"{version}\"\n"
-        );
-
-        if !read.is_empty() || !write.is_empty() {
-            out.push_str("\n[capabilities.filesystem]\n");
-            if !read.is_empty() {
-                out.push_str(&list("read", &read));
-            }
-            if !write.is_empty() {
-                out.push_str(&list("write", &write));
-            }
-        }
-        for (section, set) in [
-            ("process", &process),
-            ("network", &network),
-            ("secrets", &secrets),
-        ] {
-            if !set.is_empty() {
-                out.push_str(&format!("\n[capabilities.{section}]\n"));
-                out.push_str(&list("allow", set));
-            }
-        }
-
-        out
+        crate::manifest::render(self.exercised.keys(), name, version)
     }
 
     /// A human-readable summary.
@@ -181,11 +142,6 @@ impl Conformance {
 
         s
     }
-}
-
-fn list(key: &str, values: &BTreeSet<String>) -> String {
-    let items: Vec<String> = values.iter().map(|v| format!("\n  {:?},", v)).collect();
-    format!("{key} = [{}\n]\n", items.join(""))
 }
 
 /// Wraps a [`ToolExecutor`] and enforces a [`Manifest`], deny-by-default.

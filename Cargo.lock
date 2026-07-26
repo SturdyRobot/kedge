@@ -1131,6 +1131,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kedge-forge"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "kedge-bench",
+ "kedge-core",
+ "kedge-ledger",
+ "kedge-skill",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "kedge-hitl"
 version = "0.3.1"
 dependencies = [

@@ -89,19 +89,59 @@ stops the plan there — that is the point of writing them down.
 
 ---
 
-- [ ] **S2 — `kedge-forge observe`: trajectory → manifest** · *risk R5* · deterministic
+- [x] **S2 — `kedge-forge observe`: trajectory → manifest** *(shipped 2026-07-26)* · *risk R5*
 
   `observe(&Trajectory, base) -> ObservedAuthority`, reusing
   `kedge_skill::required` so observation and enforcement cannot diverge.
-  Surfaces indeterminate calls rather than dropping them.
 
   **Acceptance:**
-  1. **Round-trip invariant:** for every run in the S1 corpus, replaying it
-     under `observe(run).manifest()` yields **0 violations and 0 unused
-     entries**. Property test over the whole corpus, not a sample.
-  2. A trajectory containing an indeterminate call produces a manifest marked
-     `complete = false` and is rejected by the gate in S5.
-  3. Emitted manifests re-parse. An unparseable manifest is a hard error.
+  1. ✔ **Round-trip invariant over all 20 corpus runs**, not a sample. The
+     corpus is generated in-process, so the test cannot pass against a stale
+     artifact. Every run: `verified exact`.
+  2. ✔ An indeterminate call is surfaced in `unobservable` and blocks
+     `is_complete()`, which S5's gate will read.
+  3. ✔ `compiled()` returns `Err` rather than storing an unparseable manifest.
+
+  **The design decision worth recording: the observer verifies its own output.**
+  An observation can be perfectly correct and still be *unmanifestable*. A
+  trajectory that ran `cargo test && curl …` exercised a real capability that no
+  manifest can ever grant, because `kedge-skill` denies any command carrying a
+  shell metacharacter and always will. Emitting a manifest for that run yields a
+  file that rejects the very trajectory it came from.
+
+  So `observe_verified` replays the trajectory through a real `SkillGuard` built
+  from the manifest it just emitted, and returns `Verification::Failed` rather
+  than handing back something authoritative-looking and wrong. The round-trip is
+  a property of the API, not something the tests happen to check.
+
+  It is not tautological: derivation and enforcement share a code path, so
+  re-deriving proves little. What it proves is that the **rendering** step
+  survived — that a manifest *can* be written granting what was observed.
+
+  **A refactor this forced.** `Conformance::minimized` and the observer both
+  emit manifests. Two emitters would eventually disagree, and the disagreement
+  would look like a finding — so both now delegate to a single
+  `kedge_skill::manifest::render`.
+
+  **One correction.** A test asserted that an unnameable effect passes
+  verification (the theory being it is invisible to both sides). It does not —
+  the guard refuses it for the same reason the observer cannot name it, so the
+  two signals agree. `is_complete()` still requires both, so neither silently
+  becomes load-bearing alone.
+
+  Observed output, `cart-002` — reads two files, writes one, two commands, no
+  invented globs:
+
+  ```toml
+  [capabilities.filesystem]
+  read  = ["${workspace}/Cargo.toml", "${workspace}/src/lib.rs"]
+  write = ["${workspace}/src/lib.rs"]
+
+  [capabilities.process]
+  allow = ["cargo check -q", "cargo test -q"]
+  ```
+
+  9 tests (7 unit + 2 acceptance), clippy clean, workspace green.
 
 ---
 

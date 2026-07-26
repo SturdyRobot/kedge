@@ -327,10 +327,65 @@ fn expand(s: &str, vars: &HashMap<String, String>) -> Result<String, ManifestErr
     Ok(out)
 }
 
-/// The host a URL would reach, for reporting. Same parse the guard enforces on,
-/// so a minimized manifest cannot name a host the check would read differently.
-pub(crate) fn host_for_report(url: &str) -> Option<String> {
-    host_of(url)
+/// Render a manifest granting exactly `caps` and nothing else.
+///
+/// The single emitter. `Conformance::minimized` and `kedge-forge`'s trajectory
+/// observer both call it, so a manifest derived from a live run and one derived
+/// from the same run replayed out of a ledger are byte-identical. Two emitters
+/// would eventually disagree, and the disagreement would look like a finding.
+///
+/// Every entry is a literal subject — no clustering, no inferred prefixes.
+pub fn render<'a>(
+    caps: impl IntoIterator<Item = &'a Capability>,
+    name: &str,
+    version: &str,
+) -> String {
+    use std::collections::BTreeSet;
+
+    let (mut read, mut write) = (BTreeSet::new(), BTreeSet::new());
+    let (mut process, mut network, mut secrets) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+
+    for cap in caps {
+        match cap {
+            Capability::FsRead(p) => read.insert(p.to_string_lossy().into_owned()),
+            Capability::FsWrite(p) => write.insert(p.to_string_lossy().into_owned()),
+            Capability::Process(c) => process.insert(c.clone()),
+            Capability::Network(u) => network.insert(host_of(u).unwrap_or_else(|| u.clone())),
+            Capability::Secret(k) => secrets.insert(k.clone()),
+        };
+    }
+
+    let mut out = format!(
+        "# Minimized from an observed run: every entry below was exercised.\n\
+         [skill]\nname    = \"{name}\"\nversion = \"{version}\"\n"
+    );
+
+    if !read.is_empty() || !write.is_empty() {
+        out.push_str("\n[capabilities.filesystem]\n");
+        if !read.is_empty() {
+            out.push_str(&list("read", &read));
+        }
+        if !write.is_empty() {
+            out.push_str(&list("write", &write));
+        }
+    }
+    for (section, set) in [
+        ("process", &process),
+        ("network", &network),
+        ("secrets", &secrets),
+    ] {
+        if !set.is_empty() {
+            out.push_str(&format!("\n[capabilities.{section}]\n"));
+            out.push_str(&list("allow", set));
+        }
+    }
+    out
+}
+
+fn list(key: &str, values: &std::collections::BTreeSet<String>) -> String {
+    let items: Vec<String> = values.iter().map(|v| format!("\n  {v:?},")).collect();
+    format!("{key} = [{}\n]\n", items.join(""))
 }
 
 /// Extract the host from a URL, or return the string if it is already a bare

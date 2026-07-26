@@ -51,6 +51,7 @@ kedge-exec = { path = "crates/kedge-exec", version = "0.3.1" }
 kedge-ledger = { path = "crates/kedge-ledger", version = "0.3.1" }
 kedge-llm = { path = "crates/kedge-llm", version = "0.3.1" }
 kedge-skill = { path = "crates/kedge-skill", version = "0.3.1" }
+kedge-forge = { path = "crates/kedge-forge", version = "0.3.1" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "sync", "fs", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }

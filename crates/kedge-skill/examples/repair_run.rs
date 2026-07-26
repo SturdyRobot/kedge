@@ -114,10 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!(
-        "\n  reached the tool server: {:?}\n",
-        rec.0.lock().unwrap()
-    );
+    println!("\n  reached the tool server: {:?}\n", rec.0.lock().unwrap());
 
     let c = guard.conformance();
     println!("{}", c.report(guard.manifest()));
@@ -152,7 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obs = g2.execute(&sibling).await?;
     println!(
         "  reading `src/secrets.rs`, which the original manifest allowed: {}",
-        if obs.is_error { "now refused" } else { "STILL ALLOWED" }
+        if obs.is_error {
+            "now refused"
+        } else {
+            "STILL ALLOWED"
+        }
     );
 
     Ok(())
