@@ -50,6 +50,14 @@ pub enum MetricKind {
     TokenDeltaThreshold,
     /// Final-answer similarity above the drift floor.
     OutputDrift,
+    /// Candidate uses **no more** tool calls than the baseline.
+    ///
+    /// The four metrics above are *parity* metrics: they ask "did this change
+    /// break the run?" and a candidate that does the same job in fewer steps
+    /// fails `StepCountParity` and `ToolCallEquivalence` outright. Forge needs
+    /// the opposite question — "is the candidate better?" — and this is it.
+    /// Fewer calls passes; more calls fails; equal passes.
+    ToolCallReduction,
 }
 
 /// Pass/fail thresholds. Defaults are deliberately lenient.
@@ -222,6 +230,18 @@ fn score_metric(
                     cand.total_tokens,
                     delta * 100.0,
                     th.token_delta_max * 100.0
+                ),
+            }
+        }
+        MetricKind::ToolCallReduction => {
+            let (b, c) = (base.tool_sequence.len(), cand.tool_sequence.len());
+            MetricResult {
+                metric: "tool_call_reduction".into(),
+                passed: c <= b,
+                detail: format!(
+                    "{b} → {c} tool call(s) ({}{})",
+                    if c <= b { "-" } else { "+" },
+                    b.abs_diff(c)
                 ),
             }
         }

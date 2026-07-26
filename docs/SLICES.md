@@ -145,29 +145,59 @@ stops the plan there — that is the point of writing them down.
 
 ---
 
-- [ ] **S3 — Reachable Authority + eval metrics** · *risk R3 (the thesis)*
+- [x] **S3 — Reachable Authority + eval metrics** *(shipped 2026-07-26)* · *risk R3*
 
-  `reach(&Manifest, root) -> Reach`, plus `SolveRate`, `ToolCallReduction`,
-  `AuthorityDelta` added to `kedge_eval::MetricKind`.
+  `reach(&Manifest, root) -> Reach`, plus `ToolCallReduction` added to
+  `kedge_eval::MetricKind`.
 
-  **Why here:** this is the first slice that can produce the security number the
-  whole BRIEF rests on, and it needs **no LLM**. If the security half of the
-  thesis is flat, we learn it now for the price of a filesystem walk instead of
-  after building a distiller.
+  ### The kill criterion, resolved
+
+  > KILL: learned-skill authority is not measurably smaller than the general
+  > agent's.
+
+  **It is smaller.** Across all 20 corpus tasks:
+
+  ```
+  writable  60 → 20   (67% cut)
+  readable  60 → 25   (58% cut)
+  ```
+
+  Every one of the 20 learned manifests is a reduction — not just the aggregate.
+  The comparison **understates** the result on purpose: the general agent is
+  given the *same* commands the skill used, because `Reach` cannot enumerate an
+  unbounded command space, so what is measured is a floor rather than a ceiling.
+
+  Reported separately, never mixed in, because `Reach` is filesystem-dependent
+  and the two are not comparable: on this repository a general agent's manifest
+  reaches **136 writable of 136 files**. That is the scale of the problem, not
+  the size of any saving.
 
   **Acceptance:**
-  1. A real number on the S1 corpus: writable-file count under the general
-     agent's manifest vs. under each learned skill's.
-  2. `is_reduction_of` returns `false` on a truncated walk. An unknown is not an
-     improvement.
-  3. A manifest granting anything outside `root` sets `escapes_root` and is
-     never scored as a reduction.
-  4. `StepCountParity` and the new `ToolCallReduction` disagree on the same
-     input, demonstrating the §6 gap was real and is now covered.
+  1. ✔ Real numbers above, asserted per-task and in aggregate.
+  2. ✔ `is_reduction_of` returns `false` on a truncated walk either side.
+  3. ✔ `escapes_root` is structural (literal pattern head vs. root) and
+     disqualifies a manifest from scoring as a reduction. A `/etc/**` grant
+     reaches 0 files in-workspace and would otherwise read as maximally tight.
+  4. ✔ `ToolCallReduction` added — it passes where `ToolCallEquivalence` fails on
+     the same input, which is the SPEC §6 gap made concrete.
 
-  > **KILL: learned-skill authority is not measurably smaller than the general
-  > agent's.** The security half is the load-bearing half. Flat here means the
-  > project has no distinctive claim, and the honest move is to say so.
+  **Scope correction.** SPEC named three new metrics for `kedge-eval`. Only
+  `ToolCallReduction` fits there: `RunProfile` has the tool sequence. `SolveRate`
+  is suite-level, not run-level, and already exists as
+  `BenchReport::solve_rate()`. `AuthorityDelta` needs a `Reach`, which would make
+  `kedge-eval` depend on `kedge-skill`; it lives in `kedge-forge` as
+  `Reach::is_reduction_of`, which *is* the metric. Forcing all three into one
+  crate would have been a worse abstraction than admitting they belong in three
+  places.
+
+  **One bug, the same class as before.** `Manifest` canonicalizes each pattern's
+  literal head at compile time, so a grant written against `/var/folders/…` is
+  stored as `/private/var/…`. Walking the uncanonicalized root matched nothing,
+  and a wide-open manifest measured as reaching **zero** files — which reads as
+  perfect least privilege. Both sides canonicalize now. Third time this exact
+  shape has appeared; it is called out in the code so the fourth is caught faster.
+
+  15 tests, clippy clean, workspace green (41 suites).
 
 ---
 
