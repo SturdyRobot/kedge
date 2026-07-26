@@ -1,8 +1,12 @@
 //! Red-team regressions.
 //!
-//! Each of these asserted a *confirmed hole* when it was written (commit
-//! `46fb532`); each now asserts the fix. The failure messages name the finding,
-//! so a regression is recognisable rather than merely red.
+//! Each of these asserted a *confirmed hole* when it was written; each now
+//! asserts the fix. The failure messages name the finding, so a regression is
+//! recognisable rather than merely red.
+//!
+//! Round A (`46fb532`) attacked the original implementation. Round B attacked
+//! the round-A *fixes*, and found four more — three of them introduced by those
+//! fixes. Fixes are new code and deserve their own pass.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -245,4 +249,123 @@ async fn a7_a_hidden_read_is_observed_and_blocks_promotion() {
         "A7 REGRESSION: promoted anyway:\n{}",
         v.report()
     );
+}
+
+/// **B1** — the round-A fix for phantom capabilities used a denylist of
+/// content-carrying key names, and its generic entries (`value`, `data`,
+/// `text`) skipped shape detection entirely — reopening A1 under a different
+/// key. A value-shape problem cannot be fixed with a list of names.
+#[tokio::test]
+async fn b1_a_rooted_path_is_seen_under_any_key_name() {
+    let m = compile(
+        "[skill]\nname=\"s\"\nversion=\"0.1.0\"\n\
+         [capabilities.filesystem]\nread=[\"/repo/src/lib.rs\"]\n",
+    );
+    let spy = Arc::new(Spy::default());
+    let g = SkillGuard::new(Arc::new(m), "/repo", spy.clone() as Arc<dyn ToolExecutor>);
+
+    for key in ["value", "data", "text", "body", "payload", "message"] {
+        let obs = g
+            .execute(&ToolCall::new(
+                "query_records",
+                serde_json::json!({ key: "/loot/shadow" }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            obs.is_error,
+            "B1 REGRESSION: `{key}` skipped shape detection"
+        );
+    }
+    assert!(spy.0.lock().unwrap().is_empty());
+}
+
+/// **B3** — a bare `a/b/c` is equally a cache key, a repo slug or a topic.
+/// Treating every one as a filesystem read inflated learned manifests with
+/// grants no run needed, which undercuts the tightness the whole project
+/// claims. It now counts only when the tool's own name does filesystem work.
+#[tokio::test]
+async fn b3_a_path_shaped_label_is_not_a_filesystem_grant() {
+    let t = one_call(
+        "query_records",
+        serde_json::json!({"cache_key": "org/repo/main"}),
+    );
+    let o = observe_verified(&t, Path::new("/repo"), "s", "0.1.0")
+        .await
+        .unwrap();
+    assert!(
+        o.exercised.is_empty(),
+        "B3 REGRESSION: a cache key became a grant — {:?}",
+        o.exercised
+    );
+
+    // But a filesystem tool passing the same shape is a real relative path.
+    let t = one_call("read_file", serde_json::json!({"resource": "src/lib.rs"}));
+    let o = observe_verified(&t, Path::new("/repo"), "s", "0.1.0")
+        .await
+        .unwrap();
+    assert!(o
+        .exercised
+        .contains_key(&Capability::FsRead(PathBuf::from("/repo/src/lib.rs"))));
+}
+
+/// **B4** — `wildcard_grants` counted filesystem globs only, so
+/// `allow = ["*.evil.com"]` reached every subdomain that will ever exist while
+/// the host *count* stayed at 1.
+#[test]
+fn b4_a_network_wildcard_counts_as_unbounded_authority() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().canonicalize().unwrap();
+    let m = compile(
+        "[skill]\nname=\"n\"\nversion=\"0.1.0\"\n\
+         [capabilities.network]\nallow=[\"*.evil.com\"]\n",
+    );
+    let r = reach(&m, &root).unwrap();
+    assert_eq!(
+        r.wildcard_grants, 1,
+        "B4 REGRESSION: a network wildcard is invisible"
+    );
+
+    let exact = compile(
+        "[skill]\nname=\"e\"\nversion=\"0.1.0\"\n\
+         [capabilities.network]\nallow=[\"api.example.com\"]\n",
+    );
+    let e = reach(&exact, &root).unwrap();
+    assert!(
+        e.is_filesystem_reduction_of(&r),
+        "B4 REGRESSION: an exact host is not tighter than a wildcard"
+    );
+}
+
+/// **B2, residual** — documented, not fixed, because the fix is the trade.
+///
+/// Name matching is on token boundaries now, so `get_profile` and `get_payload`
+/// are no longer refused. But a tool whose name contains a *real* I/O token
+/// while doing no I/O — `read_only_status`, `load_balancer_status` — is still
+/// refused when it names nothing. That is the fail-safe cost, and it is
+/// asserted here so it stays a known, deliberate behaviour rather than
+/// resurfacing later as a surprise.
+#[test]
+fn b2_residual_a_real_io_token_still_refuses_even_when_the_tool_does_no_io() {
+    for name in ["read_only_status", "load_balancer_status"] {
+        let r = kedge_skill::required(
+            &ToolCall::new(name, serde_json::json!({"id": 42})),
+            Path::new("/repo"),
+        );
+        assert!(
+            matches!(r, kedge_skill::Requirement::Indeterminate(_)),
+            "`{name}` is expected to be refused — if this changed, the trade changed"
+        );
+    }
+    // The ones the substring bug caught are free again.
+    for name in ["get_profile", "get_payload", "list_openings"] {
+        let r = kedge_skill::required(
+            &ToolCall::new(name, serde_json::json!({"id": 42})),
+            Path::new("/repo"),
+        );
+        assert!(
+            matches!(r, kedge_skill::Requirement::Known(_)),
+            "B2 REGRESSION: `{name}` refused again"
+        );
+    }
 }

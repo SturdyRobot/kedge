@@ -131,18 +131,6 @@ const NETWORK_KEYS: &[&str] = &[
     "url", "uri", "endpoint", "href", "host", "hostname", "address",
 ];
 
-// Argument keys that carry *contents*, never a location.
-//
-// These are excluded from value-shape detection entirely. A Rust source file
-// begins `//! …`, which starts with `/` and therefore looked exactly like an
-// absolute path — so every `write_file {"path": …, "content": <source>}` in the
-// bench corpus derived a second, garbage filesystem capability from its own
-// payload. Shape detection is a fallback for keys we do not recognize; a key we
-// *do* recognize as content must never reach it.
-const CONTENT_KEYS: &[&str] = &[
-    "content", "contents", "body", "text", "data", "payload", "value", "message", "patch", "diff",
-];
-
 // Argument keys that name a credential.
 const SECRET_KEYS: &[&str] = &[
     "token",
@@ -163,6 +151,7 @@ const SECRET_KEYS: &[&str] = &[
 /// paths are resolved against.
 pub fn required(call: &ToolCall, base: &Path) -> Requirement {
     let mutating = classify(&call.name).is_mutating();
+    let promises_io = name_promises_io(&call.name);
     let mut found = BTreeSet::new();
     let mut saw_capability_key = false;
 
@@ -171,6 +160,7 @@ pub fn required(call: &ToolCall, base: &Path) -> Requirement {
         None,
         base,
         mutating,
+        promises_io,
         &mut found,
         &mut saw_capability_key,
     ) {
@@ -185,7 +175,7 @@ pub fn required(call: &ToolCall, base: &Path) -> Requirement {
                 call.name
             ));
         }
-        if name_promises_io(&call.name) {
+        if promises_io {
             return Requirement::Indeterminate(format!(
                 "`{}` names a filesystem or network operation but no argument identifies \
                  what it would touch, so no manifest can constrain it",
@@ -200,18 +190,20 @@ pub fn required(call: &ToolCall, base: &Path) -> Requirement {
 }
 
 /// Recursively scan arguments. `key` is the enclosing object key, if any.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     value: &Value,
     key: Option<&str>,
     base: &Path,
     mutating: bool,
+    promises_io: bool,
     out: &mut BTreeSet<Capability>,
     saw: &mut bool,
 ) -> Result<(), String> {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
-                walk(v, Some(k.as_str()), base, mutating, out, saw)?;
+                walk(v, Some(k.as_str()), base, mutating, promises_io, out, saw)?;
             }
             Ok(())
         }
@@ -236,7 +228,7 @@ fn walk(
             }
             for item in items {
                 // Otherwise an array inherits its parent's key: `paths: ["a", "b"]`.
-                walk(item, key, base, mutating, out, saw)?;
+                walk(item, key, base, mutating, promises_io, out, saw)?;
             }
             Ok(())
         }
@@ -285,13 +277,10 @@ fn walk(
             //
             // Matching on shape rather than name means an unknown vocabulary
             // costs precision, not soundness.
-            if CONTENT_KEYS.contains(&lower.as_str()) {
-                return Ok(());
-            }
             if looks_like_url(s) {
                 *saw = true;
                 out.insert(Capability::Network(s.clone()));
-            } else if looks_like_path(s) {
+            } else if looks_like_path(s, promises_io) {
                 *saw = true;
                 return insert_path(s, key, base, mutating, out);
             }
@@ -328,18 +317,25 @@ fn insert_path(
 /// An unambiguous prefix (`/`, `./`, `../`, `~/`) counts on its own, whitespace
 /// and all. A bare `contains('/')` only counts when there is no whitespace, so
 /// prose like `"see /docs/readme for details"` is not mistaken for a path.
-fn looks_like_path(s: &str) -> bool {
-    // A path has no newlines and is not enormous. Both guards exist because a
-    // file's *contents* were being shape-matched as a location: source text
-    // beginning `//!` starts with `/`, which the prefix rule below accepts.
-    // `CONTENT_KEYS` catches the named cases; these catch the rest.
+fn looks_like_path(s: &str, promises_io: bool) -> bool {
+    // No newlines, not enormous. These guards are what stop a file's *contents*
+    // being shape-matched as a location — Rust source begins `//!`, which starts
+    // with `/`. An earlier attempt used a denylist of content-carrying key names
+    // instead, and the generic entries in it (`value`, `data`, `text`) reopened
+    // the very bypass the shape check exists to close. A value-shape problem
+    // cannot be fixed with a list of names.
     if s.is_empty() || s.len() > MAX_PATH_LEN || s.contains(['\n', '\r']) {
         return false;
     }
+    // A rooted path is unambiguous under any key.
     if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") || s.starts_with("~/") {
         return true;
     }
-    s.contains('/') && !s.chars().any(char::is_whitespace)
+    // A bare `a/b/c` is ambiguous — it is equally a cache key, a repo slug or a
+    // topic. It counts only when the tool's own name says it does filesystem
+    // work, which is the difference between `read_file {"resource": "src/x.rs"}`
+    // and `query_records {"cache_key": "org/repo/main"}`.
+    promises_io && s.contains('/') && !s.chars().any(char::is_whitespace)
 }
 
 /// Longer than any real path on any platform we target.
@@ -357,11 +353,59 @@ fn looks_like_url(s: &str) -> bool {
 /// naming no path it will read cannot be granted, so it is refused.
 fn name_promises_io(name: &str) -> bool {
     const TOKENS: &[&str] = &[
-        "file", "dir", "folder", "path", "read", "write", "fetch", "http", "url", "download",
-        "upload", "load", "save", "copy", "move", "open",
+        "file",
+        "files",
+        "dir",
+        "dirs",
+        "directory",
+        "folder",
+        "folders",
+        "path",
+        "paths",
+        "read",
+        "write",
+        "fetch",
+        "http",
+        "url",
+        "download",
+        "upload",
+        "load",
+        "save",
+        "copy",
+        "move",
+        "open",
+        "cat",
+        "stat",
     ];
-    let lower = name.to_ascii_lowercase();
-    TOKENS.iter().any(|t| lower.contains(t))
+    // Whole tokens, not substrings. Substring matching refused `get_profile`
+    // (contains `file`), `get_payload` (contains `load`) and `list_openings`
+    // (contains `open`) — a security check that refuses ordinary tools is one
+    // that gets switched off.
+    name_tokens(name)
+        .iter()
+        .any(|tok| TOKENS.contains(&tok.as_str()))
+}
+
+/// Split a tool name into lowercase tokens on separators and camelCase humps.
+fn name_tokens(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in name.chars() {
+        if matches!(c, '_' | '-' | '.' | '/' | ' ' | ':') {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else if c.is_uppercase() && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur.push(c.to_ascii_lowercase());
+        } else {
+            cur.push(c.to_ascii_lowercase());
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -438,6 +482,10 @@ mod tests {
     /// Value-shape detection made a `write_file` payload derive a second,
     /// garbage capability: Rust source begins `//! …`, which starts with `/`.
     /// Every write in the bench corpus grew a phantom filesystem grant.
+    ///
+    /// The first attempt at this fix was a denylist of content-carrying key
+    /// names, and its generic entries (`value`, `data`, `text`) reopened A1 —
+    /// so a value-shape problem is now solved with value-shape guards only.
     #[test]
     fn a_file_payload_is_never_mistaken_for_a_location() {
         let source = "//! Numeric bounds.\n\npub fn clamp(v: i32) -> i32 { v }\n";
@@ -448,10 +496,88 @@ mod tests {
         assert_eq!(r.len(), 1, "the payload produced a phantom grant: {r:?}");
         assert!(r.contains(&Capability::FsWrite(PathBuf::from("/repo/src/lib.rs"))));
 
-        // Both guards, independently: a content-named key…
-        assert!(caps("get_page", json!({"body": "/etc/shadow"})).is_empty());
-        // …and any multi-line value, whatever it is called.
+        // Multi-line and oversized values are not paths, whatever the key.
         assert!(caps("get_page", json!({"blob": "/etc/shadow\nmore"})).is_empty());
+        assert!(caps("get_page", json!({"blob": "/x".repeat(4000)})).is_empty());
+    }
+
+    /// Red-team B1: a *rooted* path is unambiguous and counts under any key,
+    /// including keys that sound like they carry content. The earlier
+    /// `CONTENT_KEYS` denylist skipped these and reopened the A1 bypass.
+    #[test]
+    fn a_rooted_path_counts_under_any_key_name() {
+        for key in ["value", "data", "text", "body", "payload", "message"] {
+            let r = caps("query_records", json!({ key: "/loot/shadow" }));
+            assert!(
+                r.contains(&Capability::FsRead(PathBuf::from("/loot/shadow"))),
+                "`{key}` skipped shape detection: {r:?}"
+            );
+        }
+    }
+
+    /// Red-team B3: a bare `a/b/c` is equally a cache key, a repo slug or a
+    /// topic. It counts only when the tool's own name does filesystem work.
+    #[test]
+    fn a_bare_relative_value_counts_only_when_the_tool_does_io() {
+        // Not a filesystem tool: this is a cache key, not a path.
+        let label = caps("query_records", json!({"cache_key": "org/repo/main"}));
+        assert!(label.is_empty(), "a cache key became a grant: {label:?}");
+
+        // A filesystem tool: the same shape is a real relative path.
+        let real = caps("read_file", json!({"resource": "src/lib.rs"}));
+        assert!(
+            real.contains(&Capability::FsRead(PathBuf::from("/repo/src/lib.rs"))),
+            "{real:?}"
+        );
+    }
+
+    /// Red-team B2: token boundaries, not substrings.
+    ///
+    /// Tested on the predicate directly rather than through `required`, because
+    /// `kedge_core::classify` reaches its own verdict first — every camelCase
+    /// name is *mutating* to it (it does not split humps, and unknown shapes
+    /// fail safe). Going through `required` would have asserted that rule while
+    /// claiming to assert this one.
+    #[test]
+    fn name_matching_is_on_token_boundaries_not_substrings() {
+        // The traps: `profile` contains `file`, `payload` contains `load`,
+        // `openings` contains `open`, `balancer` contains… nothing, but
+        // `load_balancer` does.
+        for name in [
+            "get_profile",
+            "get_payload",
+            "list_openings",
+            "getProfileCard",
+            "reader_stats",
+        ] {
+            assert!(
+                !name_promises_io(name),
+                "`{name}` was treated as an I/O tool"
+            );
+        }
+        // And the real ones still are, camelCase included.
+        for name in [
+            "read_file",
+            "readFile",
+            "fetch",
+            "download_blob",
+            "load_config",
+            "listFiles",
+            "writePath",
+        ] {
+            assert!(name_promises_io(name), "`{name}` was not treated as I/O");
+        }
+    }
+
+    #[test]
+    fn tool_names_split_on_separators_and_camel_humps() {
+        assert_eq!(name_tokens("read_file"), ["read", "file"]);
+        assert_eq!(name_tokens("readFile"), ["read", "file"]);
+        assert_eq!(name_tokens("get-profile.card"), ["get", "profile", "card"]);
+        assert_eq!(
+            name_tokens("puppeteer_screenshot"),
+            ["puppeteer", "screenshot"]
+        );
     }
 
     #[test]

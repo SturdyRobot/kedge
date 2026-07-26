@@ -65,13 +65,17 @@ pub struct Reach {
     pub commands: usize,
     /// Distinct network allow-entries. Reported, never compared, same reason.
     pub hosts: usize,
-    /// Filesystem grants containing an unescaped wildcard.
+    /// Grants containing an unescaped wildcard — filesystem **and network**.
     ///
     /// A point-in-time file count cannot tell `write = ["/repo/a.rs"]` from
     /// `write = ["/repo/**"]` in a directory holding one file — both reach
     /// exactly one. They diverge the moment a file is added, and only one of
     /// them gained authority without anyone editing it. Counting wildcards is
     /// how that unbounded future authority stays visible.
+    ///
+    /// Network is included for the same reason and was initially missed:
+    /// `allow = ["*.evil.com"]` reaches every subdomain that will ever exist,
+    /// and the host *count* is 1.
     pub wildcard_grants: usize,
     /// A grant matches somewhere outside the root.
     pub escapes_root: bool,
@@ -157,7 +161,9 @@ pub fn reach(manifest: &Manifest, root: &Path) -> std::io::Result<Reach> {
         wildcard_grants: manifest
             .declared()
             .iter()
-            .filter(|(kind, pattern)| kind.starts_with("filesystem.") && has_wildcard(pattern))
+            .filter(|(kind, pattern)| {
+                (kind.starts_with("filesystem.") || *kind == "network") && has_wildcard(pattern)
+            })
             .count(),
     };
 
