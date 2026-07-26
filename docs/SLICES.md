@@ -201,37 +201,76 @@ stops the plan there — that is the point of writing them down.
 
 ---
 
-- [ ] **S4 — `kedge-forge` registry: versions, lineage, results** · *risk R8*
+- [x] **S4 — `kedge-forge` registry: versions, lineage, results** *(shipped 2026-07-26)*
 
-  SQLite (WAL, same idiom as `kedge-ledger`): skill records, parent links,
-  reach, eval results, promotion and rollback history.
+  SQLite (WAL): skill records, parent links, measured reach, and an append-only
+  history of every promotion, rollback, **and refusal**.
 
   **Acceptance:**
-  1. `lineage(id)` returns the full parent chain in order.
-  2. A failed promotion leaves **no** partial write — asserted by killing the
-     transaction mid-flight, not by inspection.
-  3. `rollback` restores the prior `current(name)` and records why.
+  1. ✔ `lineage(id)` returns the full parent chain, oldest first, with a cycle
+     guard — corruption should stop the walk, not hang it.
+  2. ✔ A promotion killed mid-flight leaves nothing moved. Asserted by injecting
+     a failure between "demote the old" and "promote the new" — the window where
+     a name has *no* current version — and **proved by positive control**:
+     removing the transaction makes the test fail with
+     *"the rollback did not restore the previous current"*.
+  3. ✔ `rollback` restores the parent and records why.
+
+  Two things beyond the acceptance list. A **partial unique index**
+  (`ON skills(name) WHERE promoted = 1`) makes "two current versions" *not
+  representable*, rather than merely something `promote` is careful about — the
+  only defence that survives a bug in the code. And **refusals are history too**:
+  a gate whose denials leave no trace is indistinguishable from one that was
+  never run.
+
+  No clocks anywhere — ordering is an autoincrementing sequence, because a
+  wall-clock column would put run-to-run variance in the middle of a pipeline
+  built to be reproducible.
 
 ---
 
-- [ ] **S5 — the promotion gate** · *risk R8*
+- [x] **S5 — the promotion gate** *(shipped 2026-07-26)*
 
-  `gate(candidate, baseline, conformance, eval) -> GateVerdict`. Deny-by-default:
-  six conditions, all required, every denial carrying at least one reason.
+  `gate(candidate, baseline, eval) -> GateVerdict`. Deny-by-default.
 
   **Acceptance:**
-  1. One adversarial test per `GateReason` variant, each with a candidate
-     constructed to trip exactly that reason.
-  2. A candidate that widens authority in **any** single dimension is denied,
-     including when it narrows in every other dimension.
-  3. `promote == false` with an empty `reasons` vec is impossible — property
-     test, not an example.
+  1. ✔ One adversarial test per blocking reason, each constructed to trip
+     exactly that reason.
+  2. ✔ Widening in **any** single dimension is denied even while narrowing every
+     other — a trade is not a reduction, and a human decides trades.
+  3. ✔ `promote == reasons.is_empty()`, checked over 288 generated combinations.
 
-  **After S5 the deterministic skeleton is complete.** Forge can observe a
-  recorded run, measure its authority, store it with lineage, and refuse to
-  promote anything that widens what it can touch — with no LLM anywhere in the
-  path. That is a shippable release on its own, and the natural stopping point
-  if the spikes go badly.
+  **The invariant is structural, not asserted.** Blocking findings live in
+  `reasons`, informational ones in `notes`. That is why `NoBaseline` — worth
+  recording, not worth blocking — cannot accidentally become load-bearing.
+  Mixing the two is how a gate quietly stops gating.
+
+  **A real bug the end-to-end run found.** The gate initially compared command
+  authority by *entry count*, and refused `cart-001` for "widening: process
+  1 → 2". It was right to refuse under that rule and the rule was wrong: a
+  baseline of `["cargo"]` is one entry permitting every cargo subcommand, while
+  `["cargo check -q", "cargo test -q"]` is two entries permitting strictly less.
+  By count, narrower reads as wider — exactly backwards.
+
+  Commands and hosts are now compared by **containment**: ask the baseline
+  manifest, via `Manifest::permits`, whether it would have allowed each of the
+  candidate's grants. Filesystem stays a count, because files under a root are
+  enumerable and a count is exact. Using the real enforcement path means the
+  gate cannot disagree with the guard about what a grant means.
+
+  A manifest that fails to compile now blocks promotion outright.
+
+---
+
+- [x] **The deterministic skeleton is complete.** `run → observe → measure →
+  register → gate` works end to end with no LLM anywhere in the path, proved on
+  all 20 corpus tasks: each learned skill is promoted over the general-agent
+  baseline it replaces, lineage records where it came from, and a successor that
+  hands back workspace-wide authority is refused with the tight version left
+  current.
+
+  This is a shippable release on its own, and the stopping point if the spikes
+  go badly.
 
 ---
 

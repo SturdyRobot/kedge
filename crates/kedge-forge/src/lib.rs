@@ -39,13 +39,17 @@
 //! Both halves share `kedge_skill`'s derivation and its single manifest
 //! renderer, so the observer and the enforcer cannot drift apart.
 
+pub mod gate;
 pub mod observe;
 pub mod reach;
+pub mod registry;
 
+pub use gate::{gate, EvalOutcome, GateNote, GateReason, GateVerdict};
 pub use observe::{
     observe, observe_verified, verify, ObservedAuthority, Unobservable, Verification,
 };
 pub use reach::{general_agent_manifest, reach, Reach, MAX_WALK};
+pub use registry::{HistoryEntry, Registry, RegistryError, SkillId, SkillRecord};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {
@@ -55,4 +59,6 @@ pub enum ForgeError {
     Ledger(#[from] kedge_ledger::LedgerError),
     #[error("walking the workspace: {0}")]
     Io(#[from] std::io::Error),
+    #[error("registry: {0}")]
+    Registry(#[from] registry::RegistryError),
 }

@@ -1139,11 +1139,13 @@ dependencies = [
  "kedge-core",
  "kedge-ledger",
  "kedge-skill",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
