@@ -20,6 +20,17 @@ cargo test --workspace
 cargo build --release
 ```
 
+Wire up the pre-push hook once per clone and the first of those runs itself:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It only checks formatting. That is the gate that is instant to run and the one
+that has actually broken `main` here, while clippy and the test suite take long
+enough that a hook running them gets bypassed within a day. Use
+`git push --no-verify` when you mean it.
+
 If your change touches `kedge-core`, keep it **wasm-clean** (no native-only
 dependencies) — the browser demo compiles it to `wasm32-unknown-unknown`:
 

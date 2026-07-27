@@ -1,0 +1,24 @@
+#!/bin/sh
+# Catch the CI failure that costs the least to prevent and the most to miss.
+#
+# `main` was pushed in a state that failed `cargo fmt --all -- --check`, which
+# turned the whole CI badge red while every test passed. Formatting is the one
+# gate that is instant to check and impossible to argue with, so it runs here.
+#
+# clippy and the test suite are deliberately NOT here. They take minutes on this
+# workspace, a pre-push hook that slow gets bypassed within a day, and a hook
+# everyone bypasses is worse than no hook. CI owns those.
+#
+# Bypass with `git push --no-verify`.
+
+set -e
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-push: no cargo on PATH, skipping" >&2
+  exit 0
+fi
+
+echo "pre-push: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-push: ok"
