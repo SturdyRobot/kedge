@@ -16,12 +16,23 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # A job with no available runner queues until GitHub's 24h ceiling, then
+    # cancels the whole run. That is exactly how v0.2.0 and v0.3.1 died: the
+    # Intel-mac job sat in the queue for a day and `Publish release` was
+    # skipped, so neither tag ever produced a release. A build that cannot get
+    # a runner should fail in twenty minutes and say so.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: macos-latest,  target: aarch64-apple-darwin,      ext: ""     }
-          - { os: macos-13,      target: x86_64-apple-darwin,       ext: ""     }
+          # Cross-compiled from the Apple Silicon runner rather than built on a
+          # `macos-13` one: that image was retired, and asking for it is what
+          # hung the two previous releases. The Apple toolchain targets both
+          # architectures from either host, so this is a target flag, not a
+          # different machine.
+          - { os: macos-latest,  target: x86_64-apple-darwin,       ext: ""     }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  ext: ""     }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   ext: ".exe" }
     steps:
@@ -69,6 +80,7 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       # fetch-depth 0 so the annotated tag's message is available below.
       - uses: actions/checkout@v4
