@@ -8,6 +8,13 @@ repository.workspace = true
 description = "Learn what a task actually needed: derive a least-privilege capability manifest from a recorded agent trajectory."
 keywords = ["agent", "capability", "least-privilege", "security", "ai"]
 categories = ["development-tools"]
+# Not published. These are security boundaries, and two rounds of adversarial
+# testing found eleven bypasses in code already described as fail-safe — the
+# second round finding four the first round's fixes created. A crates.io
+# release is permanent and is an implicit promise the boundary holds.
+# Blocker: Spike 003 (docs/SLICES.md) — behaviour against real MCP server
+# vocabularies is unmeasured, and the false-refusal rate could be high.
+publish = false
 
 [dependencies]
 kedge-core = { workspace = true }
