@@ -39,10 +39,12 @@
 //! structure in it is whatever the author scripted. It can validate the
 //! machinery that looks for structure. It cannot discover any. See `RISKS.md` R9.
 
+pub mod adversarial;
 pub mod checks;
 pub mod fixture;
 pub mod runner;
 pub mod scripted;
+pub mod security;
 pub mod suite;
 pub mod tools;
 
@@ -54,6 +56,8 @@ use serde::{Deserialize, Serialize};
 pub use fixture::FixtureError;
 pub use runner::{run_suite, BenchOutcome, BenchReport};
 pub use scripted::ScriptedReasoner;
+pub use adversarial::{scenarios, Category, Intent, Scenario};
+pub use security::{report as security_report, run as run_security, Defence, Score};
 pub use suite::suite;
 pub use tools::WorkspaceTools;
 

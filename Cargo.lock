@@ -1054,6 +1054,7 @@ dependencies = [
  "async-trait",
  "kedge-core",
  "kedge-ledger",
+ "kedge-skill",
  "serde",
  "serde_json",
  "tempfile",
