@@ -45,6 +45,23 @@ impl ApprovalDecision {
 #[async_trait::async_trait]
 pub trait Approver: Send + Sync {
     async fn decide(&self, call: &ToolCall, risk: Risk) -> ApprovalDecision;
+
+    /// What the *model* is told when this approver refuses.
+    ///
+    /// This matters more than an error string usually does, because the agent
+    /// reads it and reasons from it. `--deny` reuses this gate with
+    /// [`DenyingApprover`], and while every approver shared one message, a
+    /// read-only lockdown told Claude a human reviewer had refused. Claude
+    /// believed it, and said so in its answer to the user:
+    ///
+    /// > I cannot complete this task because the only available tool (shell)
+    /// > was denied by the human reviewer
+    ///
+    /// No human was ever asked. A guard that misreports its own mechanism
+    /// makes the agent lie on its behalf.
+    fn denial_note(&self) -> &'static str {
+        "was denied by a human reviewer (HITL)"
+    }
 }
 
 /// Prompts on the terminal and reads `y`/`N` from stdin.
@@ -92,6 +109,10 @@ pub struct DenyingApprover;
 impl Approver for DenyingApprover {
     async fn decide(&self, _call: &ToolCall, _risk: Risk) -> ApprovalDecision {
         ApprovalDecision::Deny
+    }
+
+    fn denial_note(&self) -> &'static str {
+        "was refused: this run is in read-only lockdown (--deny), so no mutating          tool can execute and no human is asked"
     }
 }
 
@@ -321,8 +342,9 @@ impl ToolExecutor for ApprovalGate {
         } else {
             self.denied.fetch_add(1, Ordering::SeqCst);
             Ok(Observation::error(format!(
-                "tool `{}` was denied by a human reviewer (HITL). Choose a different approach.",
-                call.name
+                "tool `{}` {}. Choose a different approach.",
+                call.name,
+                self.approver.denial_note()
             )))
         }
     }
@@ -331,6 +353,29 @@ impl ToolExecutor for ApprovalGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Found by running the harness against a real model for the first time.
+    /// Read-only lockdown reported itself as a human refusal, the agent
+    /// believed it, and told the user a reviewer had denied the call. Nobody
+    /// had been asked.
+    #[tokio::test]
+    async fn read_only_lockdown_does_not_claim_a_human_refused() {
+        let note = DenyingApprover.denial_note();
+        assert!(
+            !note.contains("human") || note.contains("no human is asked"),
+            "lockdown must not read as a human decision: {note}"
+        );
+        assert!(
+            note.contains("read-only lockdown"),
+            "it should name the real mechanism: {note}"
+        );
+    }
+
+    /// ...and an actual human gate still says so, because that one is true.
+    #[tokio::test]
+    async fn a_real_human_gate_still_says_human() {
+        assert!(CliApprover.denial_note().contains("human reviewer"));
+    }
     use async_trait::async_trait;
 
     struct RealTool;
@@ -388,7 +433,20 @@ mod tests {
             .unwrap();
         assert!(obs.is_error);
         assert!(!obs.content.contains("RAN")); // never reached the real tool
-        assert!(obs.content.contains("denied by a human"));
+                                               // This test drives DenyingApprover, which is what --deny uses, so the
+                                               // message must describe lockdown and not a human. It previously
+                                               // asserted "denied by a human" and passed, which is how the wrong
+                                               // wording reached a real model.
+        assert!(
+            obs.content.contains("read-only lockdown"),
+            "{}",
+            obs.content
+        );
+        assert!(
+            !obs.content.contains("denied by a human reviewer"),
+            "{}",
+            obs.content
+        );
         assert_eq!(g.denied(), 1);
         let events = ledger.events(run_id).unwrap();
         assert!(events.iter().any(|e| matches!(

@@ -156,6 +156,33 @@ impl ChatReasoner {
 }
 
 /// A coarse, human-friendly label for an OpenAI-compatible endpoint, for traces.
+/// Whether this provider accepts OpenAI's `response_format: {"type":"json_object"}`.
+///
+/// Anthropic serves an OpenAI-compatible endpoint but only accepts
+/// `json_schema` there, and rejects the request outright:
+///
+/// ```text
+/// 400 Bad Request: response_format.type: Input should be 'json_schema'
+/// ```
+///
+/// Found the first time this harness was pointed at a real Claude model, which
+/// is a fair comment on how much a passing test suite tells you about talking
+/// to somebody else's API.
+///
+/// Dropping the hint rather than translating it to `json_schema` is deliberate:
+/// it is belt-and-braces either way. The system prompt already demands JSON,
+/// and [`extract_json_object`] already recovers an object from prose and
+/// markdown fences, because models ignore json-mode regardless of who is
+/// serving them.
+fn json_object_mode(base_url: &str) -> Option<ResponseFormat> {
+    if base_url.contains("anthropic.com") {
+        return None;
+    }
+    Some(ResponseFormat {
+        kind: "json_object",
+    })
+}
+
 fn provider_label(base_url: &str) -> String {
     let host = base_url
         .split_once("://")
@@ -166,6 +193,8 @@ fn provider_label(base_url: &str) -> String {
         "ollama".into()
     } else if host.contains("openai.com") {
         "openai".into()
+    } else if host.contains("anthropic.com") {
+        "anthropic".into()
     } else if host.contains("localhost") || host.contains("127.0.0.1") {
         "local".into()
     } else {
@@ -196,9 +225,7 @@ impl Reasoner for ChatReasoner {
             model: &self.model,
             messages: &messages,
             temperature: self.temperature,
-            response_format: Some(ResponseFormat {
-                kind: "json_object",
-            }),
+            response_format: json_object_mode(&self.base_url),
             stream: false,
         };
         let url = format!("{}/chat/completions", self.base_url);
@@ -372,6 +399,33 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// The bug that only appeared when this was pointed at a real Claude model:
+    /// Anthropic's OpenAI-compatible endpoint rejects `json_object` outright, so
+    /// sending it fails the request before the model is ever reached.
+    #[test]
+    fn anthropic_does_not_get_the_openai_json_hint() {
+        assert!(json_object_mode("https://api.anthropic.com/v1").is_none());
+        assert!(json_object_mode("https://api.anthropic.com/v1/").is_none());
+    }
+
+    /// ...and every provider that does accept it still gets it.
+    #[test]
+    fn every_other_provider_still_gets_json_mode() {
+        for base in [
+            "https://api.openai.com/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+        ] {
+            let m = json_object_mode(base).expect(base);
+            assert_eq!(m.kind, "json_object");
+        }
+    }
+
+    #[test]
+    fn anthropic_is_named_in_the_trace() {
+        assert_eq!(provider_label("https://api.anthropic.com/v1"), "anthropic");
+    }
 
     #[test]
     fn parses_a_clean_tool_decision() {
