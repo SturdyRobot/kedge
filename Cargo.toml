@@ -63,7 +63,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
