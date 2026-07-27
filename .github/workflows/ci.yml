@@ -104,6 +104,24 @@ jobs:
       - name: Output must match the figures the site quotes
         run: diff -u crates/kedge-bench/tests/golden/adversarial_report.txt adversarial_report.txt
 
+      # The golden diff catches behaviour drifting away from the docs. It does
+      # not catch the docs drifting away from behaviour: the README table is
+      # hand-written prose, and editing a digit there would pass everything
+      # above. Assert each result row of the golden appears verbatim in the
+      # README, so the two cannot disagree in either direction.
+      - name: README must quote those same rows
+        shell: bash
+        run: |
+          status=0
+          while IFS= read -r row; do
+            if ! grep -Fqx "$row" README.md; then
+              echo "::error file=README.md::README is missing this row from the golden report: $row"
+              status=1
+            fi
+          done < <(grep -E '^  (no protection|kedge-skill manifest|deny everything) ' \
+                     crates/kedge-bench/tests/golden/adversarial_report.txt)
+          exit $status
+
       # Uploaded whether or not the diff passed, so a failure can be read
       # without re-running anything.
       - if: always()
