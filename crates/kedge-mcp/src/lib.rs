@@ -1003,7 +1003,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_handshake() {
         let client = mock_server();
-        let info = client.initialize("sturdy-test").await.unwrap();
+        let info = client.initialize("kedge-test").await.unwrap();
         assert_eq!(info.name, "mock");
         assert_eq!(info.version, "1.2.3");
     }
@@ -1011,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn list_and_call_tools() {
         let client = mock_server();
-        client.initialize("sturdy-test").await.unwrap();
+        client.initialize("kedge-test").await.unwrap();
 
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);

@@ -706,7 +706,7 @@ mod tests {
     #[tokio::test]
     async fn verify_flags_a_directory_that_is_not_a_cargo_project() {
         // A build that can't even start (no Cargo.toml) must not read as "ok".
-        let dir = std::env::temp_dir().join(format!("sturdy-notcargo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kedge-notcargo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let report = verify_rust(&dir, Duration::from_secs(60)).await.unwrap();
         assert!(!report.ok, "an empty directory must not verify as ok");
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn verifier_detects_by_marker_in_priority_order() {
-        let dir = std::env::temp_dir().join(format!("sturdy-detect-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kedge-detect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(Verifier::detect(&dir), None);
@@ -732,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_reports_no_recognized_project() {
-        let dir = std::env::temp_dir().join(format!("sturdy-noproj-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kedge-noproj-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let r = verify(&dir, Duration::from_secs(30)).await.unwrap();
