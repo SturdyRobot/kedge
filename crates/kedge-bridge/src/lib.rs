@@ -36,11 +36,23 @@ fn parse_lang(lang: &str) -> PyResult<Language> {
 }
 
 /// `sha256` content hash of `source` — the deterministic cache key Kedge uses.
+///
+/// Must stay byte-identical to `kedge_cache::content_hash`, which is pinned
+/// against the published SHA-256 digests by a test. Hand-rolled hex because
+/// sha2 0.11 dropped `LowerHex` on the digest type. This crate is outside the
+/// workspace, so `cargo test --workspace` does not reach it; changing this
+/// without changing the other is a silent cache split.
 #[pyfunction]
 fn content_hash(source: &str) -> String {
     let mut h = Sha256::new();
     h.update(source.as_bytes());
-    format!("{:x}", h.finalize())
+    let digest = h.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// AST-aware compaction: keep the code skeleton, elide function bodies. Returns a

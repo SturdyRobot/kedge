@@ -20,4 +20,4 @@ pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 kedge-compact = { path = "../kedge-compact", version = "0.4.0" }
 kedge-policy = { path = "../kedge-policy", version = "0.4.0" }
 kedge-audit = { path = "../kedge-audit", version = "0.4.0" }
-sha2 = "0.10"
+sha2 = "0.11"

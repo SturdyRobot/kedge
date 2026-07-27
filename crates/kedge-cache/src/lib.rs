@@ -59,10 +59,26 @@ CREATE TABLE IF NOT EXISTS ast_cache_v2 (
 "#;
 
 /// The sha256 content hash used as the cache key.
+///
+/// Hex-encoded by hand rather than with `format!("{:x}", ..)`: sha2 0.11 stopped
+/// implementing `LowerHex` on the digest type. The output is byte-identical to
+/// what 0.10 produced, which matters because this string is the primary key of
+/// every row already written to disk. `hash_is_lowercase_unseparated_sha256`
+/// pins it against the published digests rather than against this function.
+///
+/// `kedge-bridge` has its own copy of this, because it is outside the workspace
+/// and depending on this crate would drag bundled SQLite into a Python wheel.
+/// The two must agree.
 pub fn content_hash(source: &str) -> String {
     let mut h = Sha256::new();
     h.update(source.as_bytes());
-    format!("{:x}", h.finalize())
+    let digest = h.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 fn now_ms() -> i64 {
@@ -183,6 +199,29 @@ mod tests {
     fn hash_is_stable_and_content_sensitive() {
         assert_eq!(content_hash("abc"), content_hash("abc"));
         assert_ne!(content_hash("abc"), content_hash("abd"));
+    }
+
+    /// The absolute pin, and the reason it exists.
+    ///
+    /// The test above compares `content_hash` against itself, so it passes just
+    /// as happily if the function starts returning a completely different
+    /// string. This value is the cache key: change its encoding and every row
+    /// already on disk becomes unreachable, silently, with the only symptom
+    /// being a cache that never hits again.
+    ///
+    /// These are the published SHA-256 digests of "abc" and the empty string,
+    /// so this checks the encoding against the standard rather than against
+    /// whatever this crate happens to do today.
+    #[test]
+    fn hash_is_lowercase_unseparated_sha256() {
+        assert_eq!(
+            content_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            content_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]

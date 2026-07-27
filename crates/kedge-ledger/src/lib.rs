@@ -154,6 +154,26 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// SQLite integers are signed 64-bit. rusqlite 0.40 dropped its `u64` impls
+/// rather than keep silently mangling values above `i64::MAX`, so the
+/// conversion happens here, once, instead of as an `as` cast at seven call
+/// sites where a future reader would have to work out whether it can wrap.
+///
+/// Every `u64` crossing this boundary is a counter: token totals and elapsed
+/// milliseconds. Saturating is the honest choice for those. Hitting the bound
+/// on `elapsed_ms` would mean a step that ran for 292 million years, and on
+/// tokens it would mean a bill nobody is paying.
+fn to_sql_int(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+/// The read side. Clamps at zero because nothing here ever writes a negative,
+/// so a negative in the column means the database was edited by hand, and
+/// wrapping it into a colossal `u64` would turn that into a nonsense metric.
+fn from_sql_int(v: i64) -> u64 {
+    v.max(0) as u64
+}
+
 /// Environment variable naming a single, machine-wide ledger. Without it each
 /// working directory grows its own `kedge.sqlite`, so lifetime totals (token
 /// savings, intercepted mutations, runs) fragment across projects.
@@ -316,8 +336,8 @@ impl Ledger {
                 step.thought.0,
                 action,
                 observation,
-                step.tokens,
-                step.elapsed_ms,
+                to_sql_int(step.tokens),
+                to_sql_int(step.elapsed_ms),
             ],
         )?;
         Ok(())
@@ -373,7 +393,12 @@ impl Ledger {
         conn.execute(
             "INSERT INTO compactions (ts_ms, label, original_tokens, compacted_tokens)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![now_ms(), label, original_tokens, compacted_tokens],
+            rusqlite::params![
+                now_ms(),
+                label,
+                to_sql_int(original_tokens),
+                to_sql_int(compacted_tokens)
+            ],
         )?;
         Ok(())
     }
@@ -381,7 +406,7 @@ impl Ledger {
     /// Cumulative compaction savings across every entry in this ledger.
     pub fn compaction_totals(&self) -> Result<CompactionTotals> {
         let conn = self.lock()?;
-        let (count, original, compacted): (u64, u64, u64) = conn.query_row(
+        let (count, original, compacted): (i64, i64, i64) = conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(original_tokens), 0),
                     COALESCE(SUM(compacted_tokens), 0)
@@ -389,10 +414,13 @@ impl Ledger {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        let (original, compacted) = (from_sql_int(original), from_sql_int(compacted));
         Ok(CompactionTotals {
-            compactions: count,
+            compactions: from_sql_int(count),
             original_tokens: original,
             compacted_tokens: compacted,
+            // Still saturating, and still on u64: compacted should never exceed
+            // original, but a hand-edited row should give 0 rather than panic.
             tokens_saved: original.saturating_sub(compacted),
         })
     }
@@ -434,8 +462,8 @@ impl Ledger {
                 thought: row.get(1)?,
                 action: row.get(2)?,
                 observation: row.get(3)?,
-                tokens: row.get(4)?,
-                elapsed_ms: row.get(5)?,
+                tokens: from_sql_int(row.get(4)?),
+                elapsed_ms: from_sql_int(row.get(5)?),
             })
         })?;
 
