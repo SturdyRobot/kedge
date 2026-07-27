@@ -31,6 +31,19 @@ pub enum MeshError {
 /// beyond this depth is refused outright.
 pub const MAX_SUBAGENT_DEPTH: u32 = 4;
 
+/// How long the supervisor waits past a subagent's own budget before killing it
+/// outright.
+///
+/// A subagent that respects its budget stops itself at `timeout_secs` and
+/// returns a proper outcome. This margin is for the one that does not: a
+/// reasoner or tool that blocks its thread rather than awaiting cannot be
+/// cancelled by the engine's `tokio::time::timeout`, and only the supervisor's
+/// `abort()` will end it.
+///
+/// Half a second is long enough to make the ordering unambiguous and short
+/// enough that a genuinely stuck child is not left running.
+pub const SUPERVISOR_GRACE: Duration = Duration::from_millis(500);
+
 /// Hard bounds and identity for a spawned subagent.
 #[derive(Debug, Clone)]
 pub struct SubagentConfig {
@@ -227,6 +240,9 @@ async fn supervise(
             tokens_used: 0,
         };
     }
+    // `timeout_secs` is the engine's budget. The supervisor's hard bound is this
+    // plus SUPERVISOR_GRACE, so a subagent that respects its own budget always
+    // terminates itself first. See the `hard_bound` comment below.
     let budget = Budget {
         max_tokens: config.max_tokens,
         max_steps: config.max_steps,
@@ -243,7 +259,23 @@ async fn supervise(
     // instead of unwinding the supervisor (and, in turn, the parent).
     let mut inner: JoinHandle<(Outcome, _)> = tokio::spawn(async move { engine.run(&task).await });
 
-    let outer_timeout = tokio::time::sleep(Duration::from_secs(config.timeout_secs));
+    // The supervisor's bound fires strictly AFTER the engine's own budget, and
+    // the gap is the entire point.
+    //
+    // Both used to be `timeout_secs`, which meant the backstop and the thing it
+    // backs up were scheduled for the same instant. Which one won was decided by
+    // tokio's timer and select! ordering, so an identical hang reported
+    // "budget exhausted" on one machine and "timed out (hard wall-clock bound)"
+    // on another. CI caught it as a test that passed 25 times locally and failed
+    // on a macOS runner.
+    //
+    // Worse than the flaky message: the outer branch is the one that calls
+    // `inner.abort()`. A backstop that only maybe runs is not a backstop. With a
+    // grace period the engine always gets first refusal, stops itself cleanly,
+    // and keeps its trajectory; the supervisor now only fires when the engine
+    // genuinely could not stop itself, which is exactly the case abort exists for.
+    let hard_bound = Duration::from_secs(config.timeout_secs) + SUPERVISOR_GRACE;
+    let outer_timeout = tokio::time::sleep(hard_bound);
     tokio::pin!(outer_timeout);
 
     let result = loop {
@@ -258,7 +290,16 @@ async fn supervise(
             _ = &mut outer_timeout => {
                 inner.abort();
                 break SubagentResult::Error {
-                    reason: format!("timed out after {}s (hard wall-clock bound)", config.timeout_secs),
+                    // Report the bound that actually fired, not `timeout_secs`.
+                    // Those are no longer the same number, and a supervisor kill
+                    // that claims to have happened half a second before it did
+                    // is the kind of detail that wastes an hour later.
+                    reason: format!(
+                        "timed out after {:.1}s (hard wall-clock bound, {}s budget + {}ms supervisor grace)",
+                        hard_bound.as_secs_f64(),
+                        config.timeout_secs,
+                        SUPERVISOR_GRACE.as_millis(),
+                    ),
                     tokens_used: tracker_read.tokens_used(),
                 };
             }
@@ -508,8 +549,18 @@ mod tests {
         assert_eq!(alive, 4);
     }
 
+    /// A subagent whose reasoner awaits forever is stopped by its OWN budget,
+    /// not by the supervisor. That ordering is the contract, so it is asserted
+    /// exactly rather than with a "contains a time word" check.
+    ///
+    /// This test used to assert `"timed out"`, the supervisor's message, and it
+    /// was a coin flip: the engine budget and the supervisor bound were both set
+    /// to `timeout_secs`, so two timers came due at the same instant and tokio
+    /// picked one. It passed 25 consecutive local runs and failed on a macOS CI
+    /// runner. The failure message now includes the reason, because "assertion
+    /// failed: reason.contains(...)" told us nothing about which layer had won.
     #[tokio::test(start_paused = true)]
-    async fn hanging_subagent_is_killed_by_timeout() {
+    async fn a_hanging_reasoner_is_stopped_by_the_engines_own_budget() {
         let parent = TaskId::new();
         let mut cfg = SubagentConfig::new("hanger", parent);
         cfg.timeout_secs = 2;
@@ -522,12 +573,74 @@ mod tests {
             Arc::new(NoopTool),
             None,
         );
-        // With paused time, the runtime auto-advances to the timeout instantly.
+        // With paused time, the runtime auto-advances to the timer instantly.
         let result = handle.wait().await;
         match result {
-            SubagentResult::Error { reason, .. } => assert!(reason.contains("timed out")),
-            other => panic!("expected timeout error, got {other:?}"),
+            SubagentResult::Error { reason, .. } => assert!(
+                reason.contains("budget exhausted") && reason.contains("wall-clock"),
+                "the engine budget should win by SUPERVISOR_GRACE, got: {reason}"
+            ),
+            other => panic!("expected an error, got {other:?}"),
         }
+    }
+
+    /// The backstop, on the only child that needs one.
+    ///
+    /// The engine bounds a slow call with `tokio::time::timeout`, which cancels
+    /// by dropping the future. A reasoner that blocks its thread instead of
+    /// awaiting cannot be dropped, so the engine's budget is powerless and only
+    /// the supervisor's `abort()` ends the run. Multi-threaded on purpose: on a
+    /// current-thread runtime a blocking reasoner would wedge the supervisor too
+    /// and there would be nothing left to do the aborting.
+    ///
+    /// Real time, not paused, because `start_paused` cannot advance a clock past
+    /// a thread that is asleep in `std::thread::sleep`. That is the whole point
+    /// of the scenario.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_backstop_fires_when_the_engine_cannot_stop_itself() {
+        struct ThreadBlockingReasoner;
+        #[async_trait]
+        impl Reasoner for ThreadBlockingReasoner {
+            async fn next_action(
+                &self,
+                _t: &Task,
+                _tr: &Trajectory,
+            ) -> kedge_core::Result<Decision> {
+                // Blocks the worker thread: uncancellable by design. Bounded so a
+                // failing test cannot hold the runtime open for long.
+                std::thread::sleep(Duration::from_secs(3));
+                unreachable!()
+            }
+        }
+
+        let parent = TaskId::new();
+        let mut cfg = SubagentConfig::new("blocker", parent);
+        cfg.timeout_secs = 1;
+        cfg.max_steps = 1_000_000;
+
+        let started = std::time::Instant::now();
+        let handle = spawn_subagent(
+            cfg,
+            "block",
+            Arc::new(ThreadBlockingReasoner),
+            Arc::new(NoopTool),
+            None,
+        );
+        let result = handle.wait().await;
+        let elapsed = started.elapsed();
+
+        match result {
+            SubagentResult::Error { reason, .. } => assert!(
+                reason.contains("timed out") && reason.contains("hard wall-clock bound"),
+                "the supervisor should be the one to end this, got: {reason}"
+            ),
+            other => panic!("expected a supervisor timeout, got {other:?}"),
+        }
+        // It returned on the supervisor's schedule, not the blocking sleep's.
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "supervisor waited for the blocked thread instead of aborting: {elapsed:?}"
+        );
     }
 
     #[tokio::test]
