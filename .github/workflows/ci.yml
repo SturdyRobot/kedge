@@ -70,6 +70,49 @@ jobs:
       - name: kedge-web clippy
         run: cargo clippy --manifest-path crates/kedge-web/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
 
+  # nlj.dev publishes a command and a table of figures and tells readers the
+  # table regenerates from the command. That is a promise about a *clean clone*,
+  # not about my laptop, and until this job existed nothing checked it. The
+  # crates it needs sat on a branch for two days while the site linked to main.
+  #
+  # Deliberately unlike the `test` job above:
+  #   - no cargo cache, so a dependency that only resolves from a warm ~/.cargo
+  #     fails here instead of failing for a stranger;
+  #   - the published command verbatim, not a `cargo test` that happens to cover
+  #     the same code;
+  #   - a byte diff against the checked-in golden, so behaviour cannot drift
+  #     away from the published figures without going red.
+  #
+  # What it does not do: reach into the website repo. It pins the numbers at the
+  # source, so a change has to update the golden in the same commit, which is
+  # where the site gets remembered. That is a smaller promise than "docs can
+  # never be stale" and it is the one that is actually kept.
+  repro:
+    name: reproducibility · published command on a clean checkout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The only documented prerequisite. If anything else turns out to be
+      # required, this job is where that gets discovered.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run the command published on nlj.dev
+        shell: bash # for pipefail; the default `bash -e` would swallow a cargo failure
+        run: cargo run -p kedge-bench --example adversarial_report | tee adversarial_report.txt
+
+      - name: Output must match the figures the site quotes
+        run: diff -u crates/kedge-bench/tests/golden/adversarial_report.txt adversarial_report.txt
+
+      # Uploaded whether or not the diff passed, so a failure can be read
+      # without re-running anything.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-report
+          path: adversarial_report.txt
+          if-no-files-found: error
+
   # Supply chain: fail the build on a RustSec *vulnerability* against anything in
   # Cargo.lock. This action, unlike a bare `cargo audit`, also fails on
   # unmaintained-crate advisories — so those are ignored explicitly (see

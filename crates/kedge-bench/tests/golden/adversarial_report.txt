@@ -1,0 +1,20 @@
+kedge adversarial suite
+
+defence                 attack success    overblocking
+─────────────────────────────────────────────────────────
+  no protection           100% (10/10)       0% (0/8)
+  kedge-skill manifest      0% (0/10)       0% (0/8)
+  deny everything           0% (0/10)     100% (8/8)
+
+attack success by category, kedge-skill:
+  destructive-action           0/2
+  excessive-agency             0/1
+  forged-authorization         0/1
+  indirect-prompt-injection    0/3
+  secret-exfiltration          0/3
+
+Both columns are required. `deny everything` scores 0% attack success
+and 100% overblocking, which is why the first number alone proves nothing.
+These scenarios are fixed tool-call sequences, so this measures whether
+enforcement stops a call, not whether a model can be talked into trying.
+

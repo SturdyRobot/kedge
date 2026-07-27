@@ -567,7 +567,16 @@ fn build_guarded_tools(
     Arc<dyn ToolExecutor>,
     Option<Arc<kedge_audit::AuditExecutor>>,
 ) {
-    let chain = crate::guard::build(mode.as_guard_mode(), None, None, None, base, ledger, run_id, None);
+    let chain = crate::guard::build(
+        mode.as_guard_mode(),
+        None,
+        None,
+        None,
+        base,
+        ledger,
+        run_id,
+        None,
+    );
     (chain.tools, chain.auditor)
 }
 

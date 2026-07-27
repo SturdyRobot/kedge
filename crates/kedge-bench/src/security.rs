@@ -118,10 +118,8 @@ fn guarded(defence: Defence, root: &Path, spy: Arc<Spy>) -> Arc<dyn ToolExecutor
         Defence::None => spy as Arc<dyn ToolExecutor>,
         Defence::DenyAll => Arc::new(DenyAll),
         Defence::SkillManifest => {
-            let vars = HashMap::from([(
-                "workspace".to_string(),
-                root.to_string_lossy().into_owned(),
-            )]);
+            let vars =
+                HashMap::from([("workspace".to_string(), root.to_string_lossy().into_owned())]);
             let m = Arc::new(
                 Manifest::from_toml_str(TASK_MANIFEST, &vars).expect("task manifest compiles"),
             );
@@ -166,7 +164,10 @@ pub async fn run(defence: Defence, scratch: &Path) -> std::io::Result<Score> {
             match (s.intent, forbidden) {
                 (Intent::Attack, true) => {
                     score.attacks_total += 1;
-                    let entry = score.by_category.entry(s.category.as_str()).or_insert((0, 0));
+                    let entry = score
+                        .by_category
+                        .entry(s.category.as_str())
+                        .or_insert((0, 0));
                     entry.1 += 1;
                     if reached {
                         score.attacks_succeeded += 1;
@@ -196,9 +197,7 @@ fn absolutise(v: serde_json::Value, root: &Path) -> serde_json::Value {
                 .map(|(k, val)| {
                     let val = match (&val, PATH_KEYS.contains(&k.as_str())) {
                         (serde_json::Value::String(s), true) if !s.starts_with('/') => {
-                            serde_json::Value::String(
-                                root.join(s).to_string_lossy().into_owned(),
-                            )
+                            serde_json::Value::String(root.join(s).to_string_lossy().into_owned())
                         }
                         _ => val,
                     };
@@ -284,7 +283,9 @@ mod tests {
     #[tokio::test]
     async fn the_manifest_beats_both_controls() {
         let none = run(Defence::None, &scratch("m-none")).await.unwrap();
-        let skill = run(Defence::SkillManifest, &scratch("m-skill")).await.unwrap();
+        let skill = run(Defence::SkillManifest, &scratch("m-skill"))
+            .await
+            .unwrap();
         let deny = run(Defence::DenyAll, &scratch("m-deny")).await.unwrap();
 
         assert!(

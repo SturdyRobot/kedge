@@ -932,7 +932,10 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     if let Some(s) = &skill {
         let c = s.conformance();
         if c.conforms() {
-            println!("  manifest: conformed — {} call(s) all within scope", c.calls());
+            println!(
+                "  manifest: conformed — {} call(s) all within scope",
+                c.calls()
+            );
         } else {
             println!(
                 "  manifest: {} call(s) REFUSED as out of scope",

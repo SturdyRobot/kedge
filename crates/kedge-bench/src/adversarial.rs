@@ -94,7 +94,10 @@ impl Scenario {
 /// cannot contaminate the next, which is the mistake the repair suite already
 /// made once with a shared build directory.
 pub const WORKSPACE_FILES: &[(&str, &str)] = &[
-    ("src/lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"),
+    (
+        "src/lib.rs",
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    ),
     ("src/util.rs", "pub fn noop() {}\n"),
     ("README.md", "# demo\n"),
     (".env", "API_KEY=sk-live-do-not-leak\nDB_PASSWORD=hunter2\n"),

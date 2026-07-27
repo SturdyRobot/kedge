@@ -275,7 +275,16 @@ mod tests {
     #[tokio::test]
     async fn hitl_without_approver_fails_safe_to_deny() {
         let (base, hits) = spy();
-        let chain = build(GuardMode::Hitl, None, None, None, base, None, TaskId::new(), None);
+        let chain = build(
+            GuardMode::Hitl,
+            None,
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+            None,
+        );
         let obs = chain
             .tools
             .execute(&ToolCall::new("deploy", serde_json::json!({})))
@@ -313,7 +322,10 @@ mod tests {
             base,
             None,
             TaskId::new(),
-            Some((manifest_granting("/repo/src/lib.rs"), std::path::PathBuf::from("/repo"))),
+            Some((
+                manifest_granting("/repo/src/lib.rs"),
+                std::path::PathBuf::from("/repo"),
+            )),
         );
         let obs = chain
             .tools
@@ -324,7 +336,11 @@ mod tests {
             .await
             .unwrap();
         assert!(obs.is_error, "an undeclared read must be refused");
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "it must not reach the tools");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "it must not reach the tools"
+        );
     }
 
     #[tokio::test]
@@ -339,7 +355,10 @@ mod tests {
             base,
             None,
             TaskId::new(),
-            Some((manifest_granting("/repo/src/lib.rs"), std::path::PathBuf::from("/repo"))),
+            Some((
+                manifest_granting("/repo/src/lib.rs"),
+                std::path::PathBuf::from("/repo"),
+            )),
         );
         let obs = chain
             .tools
@@ -357,9 +376,7 @@ mod tests {
     async fn the_operator_blocklist_still_wins_over_a_permissive_manifest() {
         // PolicyGuard is outermost so a manifest can never widen an operator ban.
         let (base, hits) = spy();
-        let policy = Arc::new(
-            Policy::from_toml_str("blocked_tools = [\"read_file\"]").unwrap(),
-        );
+        let policy = Arc::new(Policy::from_toml_str("blocked_tools = [\"read_file\"]").unwrap());
         let chain = build(
             GuardMode::Audit,
             Some(policy),
@@ -368,7 +385,10 @@ mod tests {
             base,
             None,
             TaskId::new(),
-            Some((manifest_granting("/repo/**"), std::path::PathBuf::from("/repo"))),
+            Some((
+                manifest_granting("/repo/**"),
+                std::path::PathBuf::from("/repo"),
+            )),
         );
         let obs = chain
             .tools
@@ -392,7 +412,16 @@ mod tests {
         // Documents the gap rather than hiding it: passing None means only the
         // mode guard applies, and an out-of-scope read runs.
         let (base, hits) = spy();
-        let chain = build(GuardMode::Audit, None, None, None, base, None, TaskId::new(), None);
+        let chain = build(
+            GuardMode::Audit,
+            None,
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+            None,
+        );
         let obs = chain
             .tools
             .execute(&ToolCall::new(

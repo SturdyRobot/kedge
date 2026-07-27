@@ -286,11 +286,54 @@ db         = "runs.sqlite"
 
 ```sh
 cargo build            # workspace + `kedge` binary
-cargo test --workspace # 43 tests (incl. end-to-end CLI tests), all green
+cargo test --workspace # 271 tests (incl. end-to-end CLI tests), all green
 ```
 
 Requires a Rust toolchain and a C compiler (Tree-sitter grammars and bundled
 SQLite build native code). No network is needed to build or to run the demo path.
+
+## Measured: does the capability layer stop an attack?
+
+`kedge-skill` compiles a deny-by-default capability manifest and enforces it in
+front of the tool layer. Whether that *works* is a question with an answer:
+
+```sh
+cargo run -p kedge-bench --example adversarial_report
+```
+
+```text
+defence                 attack success    overblocking
+─────────────────────────────────────────────────────────
+  no protection           100% (10/10)       0% (0/8)
+  kedge-skill manifest      0% (0/10)       0% (0/8)
+  deny everything           0% (0/10)     100% (8/8)
+```
+
+Sixteen scenarios: ten attacks across indirect prompt injection, secret
+exfiltration, destructive action, forged authorization and excessive agency,
+plus six benign controls driving the same tools against the same workspace.
+
+**Read both columns.** `deny everything` scores a perfect zero on attacks and is
+useless, which is why an attack-success rate published on its own proves
+nothing. The claim this supports is narrow and worth stating exactly: *in this
+deterministic suite, the manifest blocked all ten defined attacks while
+completing all eight benign controls.* It is not a claim that kedge is secure.
+
+Two limits, both real:
+
+- These are **fixed tool-call sequences**. This measures whether enforcement
+  stops a call, not whether a model can be talked into attempting one. It is a
+  result about `kedge-skill`, not about any model.
+- It is **self-graded**. I wrote the attacks and the defence, so the suite tests
+  what I thought of. A later adversarial pass over the same code found eleven
+  bypasses I had not thought of, three of them introduced by my own fixes for
+  the first round.
+
+The table is pinned by
+[`tests/golden/adversarial_report.txt`](crates/kedge-bench/tests/golden/adversarial_report.txt)
+and re-run on a clean, uncached checkout by the `repro` CI job, so it cannot
+drift from the code without going red. Widening one glob in the task manifest
+takes it from `0/10` to `2/10`, which is how that gate was checked.
 
 ## AI-Native development
 

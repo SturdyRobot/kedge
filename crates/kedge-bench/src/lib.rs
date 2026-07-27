@@ -53,10 +53,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub use adversarial::{scenarios, Category, Intent, Scenario};
 pub use fixture::FixtureError;
 pub use runner::{run_suite, BenchOutcome, BenchReport};
 pub use scripted::ScriptedReasoner;
-pub use adversarial::{scenarios, Category, Intent, Scenario};
 pub use security::{report as security_report, run as run_security, Defence, Score};
 pub use suite::suite;
 pub use tools::WorkspaceTools;
