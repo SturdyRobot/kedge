@@ -1014,6 +1014,7 @@ dependencies = [
  "kedge-mcp",
  "kedge-policy",
  "kedge-server",
+ "kedge-skill",
  "nix",
  "opentelemetry",
  "opentelemetry-otlp",

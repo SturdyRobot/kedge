@@ -94,9 +94,10 @@ Bundled utilities (handy, not the headline; dedicated tools go deeper in each la
 - **Regression gate** (`kedge eval`): diff a run against a baseline ledger
   (step/tool/token/drift metrics), emit JUnit + a CI exit code; local and
   deterministic, no LLM-judge spend.
-- **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge` →
-  `pip install kedge-rt`), and an **experimental, observe-only eBPF/LSM prototype**
-  (`kedge-probe`, Linux: it logs, it does *not* enforce; see the crate docs).
+- **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge`,
+  built locally with `maturin develop`; **not published to PyPI**), and an
+  **experimental, observe-only eBPF/LSM prototype** (`kedge-probe`, Linux: it
+  logs, it does *not* enforce; see the crate docs).
 
 ## Install
 

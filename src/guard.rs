@@ -9,11 +9,30 @@
 //! Layering, outermost first:
 //!
 //! ```text
-//!   PolicyGuard  →  mode guard (audit | hitl | deny | live)  →  base tools
+//!   PolicyGuard  →  SkillGuard  →  mode guard (audit|hitl|deny|live)  →  tools
 //! ```
 //!
-//! The policy is the operator's hard rule (a blocked tool is refused, PII in tool
-//! output is redacted) and is applied *first*, regardless of mode.
+//! Three layers, three different questions, deliberately in this order.
+//!
+//! **PolicyGuard** is the operator's hard rule and applies regardless of mode: a
+//! blocked tool is refused and PII in tool output is redacted. It is a
+//! *blocklist*, so anything not named is allowed through.
+//!
+//! **SkillGuard** is the opposite default. It is a deny-by-default capability
+//! manifest scoped to *this task*: the skill declares what it may read, write,
+//! run and reach, and anything undeclared is refused. Without it, kedge shipped
+//! two policy systems with opposite defaults that did not know about each other,
+//! and only the weaker one was wired in.
+//!
+//! Order matters even though both deny-win. The operator's ban is outermost so
+//! it cannot be widened by a skill manifest, and so its refusal is the reason a
+//! user sees. The manifest sits above the mode guard so a call the task never
+//! declared is refused before the approval machinery is asked about it: there is
+//! no point prompting a human to approve something the skill was never scoped to
+//! do.
+//!
+//! Passing `manifest: None` means no per-task scoping, which is the pre-existing
+//! behaviour and is *less* safe. It is not the default anywhere new.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,6 +43,7 @@ use kedge_core::{TaskId, ToolExecutor, ToolSafety};
 use kedge_hitl::{ApprovalGate, Approver, DenyingApprover};
 use kedge_ledger::Ledger;
 use kedge_policy::{Policy, PolicyGuard};
+use kedge_skill::{Manifest, SkillGuard};
 
 /// Per-tool safety resolved from declared capabilities (e.g. MCP annotations),
 /// consulted before name-based classification.
@@ -50,6 +70,9 @@ pub struct GuardChain {
     pub tools: Arc<dyn ToolExecutor>,
     pub auditor: Option<Arc<kedge_audit::AuditExecutor>>,
     pub gate: Option<Arc<ApprovalGate>>,
+    /// Present when a manifest scoped the run. Query it afterwards for what the
+    /// task actually exercised versus what it declared.
+    pub skill: Option<Arc<SkillGuard>>,
 }
 
 /// The mode guard's output: the wrapped executor plus optional reporting handles.
@@ -61,6 +84,7 @@ type ModeChain = (
 
 /// Build the canonical chain. `approver` is only consulted in [`GuardMode::Hitl`];
 /// if it is `None` there, the chain fails **safe** by denying every mutating tool.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     mode: GuardMode,
     policy: Option<Arc<Policy>>,
@@ -69,6 +93,7 @@ pub fn build(
     base: Arc<dyn ToolExecutor>,
     ledger: Option<Arc<Ledger>>,
     run_id: TaskId,
+    manifest: Option<(Arc<Manifest>, std::path::PathBuf)>,
 ) -> GuardChain {
     // ── inner: the mode guard ──
     let (mode_tools, auditor, gate): ModeChain = match mode {
@@ -95,16 +120,26 @@ pub fn build(
         }
     };
 
+    // ── middle: the per-task capability manifest (deny-by-default) ──
+    let (skilled, skill) = match manifest {
+        Some((m, workspace)) => {
+            let g = Arc::new(SkillGuard::new(m, workspace, mode_tools));
+            (g.clone() as Arc<dyn ToolExecutor>, Some(g))
+        }
+        None => (mode_tools, None),
+    };
+
     // ── outer: the policy guard (operator's hard rule, applied first at runtime) ──
     let tools = match policy {
-        Some(p) => Arc::new(PolicyGuard::new(p, mode_tools)) as Arc<dyn ToolExecutor>,
-        None => mode_tools,
+        Some(p) => Arc::new(PolicyGuard::new(p, skilled)) as Arc<dyn ToolExecutor>,
+        None => skilled,
     };
 
     GuardChain {
         tools,
         auditor,
         gate,
+        skill,
     }
 }
 
@@ -163,6 +198,7 @@ mod tests {
             base,
             None,
             TaskId::new(),
+            None,
         );
         let obs = chain
             .tools
@@ -188,6 +224,7 @@ mod tests {
             base,
             None,
             TaskId::new(),
+            None,
         );
         let obs = chain
             .tools
@@ -219,6 +256,7 @@ mod tests {
             base,
             None,
             TaskId::new(),
+            None,
         );
         let obs = chain
             .tools
@@ -237,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn hitl_without_approver_fails_safe_to_deny() {
         let (base, hits) = spy();
-        let chain = build(GuardMode::Hitl, None, None, None, base, None, TaskId::new());
+        let chain = build(GuardMode::Hitl, None, None, None, base, None, TaskId::new(), None);
         let obs = chain
             .tools
             .execute(&ToolCall::new("deploy", serde_json::json!({})))
@@ -245,5 +283,125 @@ mod tests {
             .unwrap();
         assert!(obs.is_error, "missing approver must deny, not execute");
         assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+    // ── the three layers, composed ──────────────────────────────────────
+    //
+    // kedge shipped two policy systems with opposite defaults that did not know
+    // about each other, and only the weaker one was wired in. These assert the
+    // composition, not just that it compiles.
+
+    fn manifest_granting(read: &str) -> Arc<Manifest> {
+        let toml = format!(
+            "[skill]\nname = \"scoped\"\nversion = \"0.1.0\"\n\
+             [capabilities.filesystem]\nread = [\"{read}\"]\n"
+        );
+        Arc::new(Manifest::from_toml_str(&toml, &std::collections::HashMap::new()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_manifest_refuses_a_read_the_mode_guard_would_have_allowed() {
+        // Audit mode intercepts *mutations*. A read outside the task's scope is
+        // not a mutation, so before SkillGuard was in the chain nothing stopped
+        // it: the mode guard asks "is this mutating?", a manifest asks "was this
+        // task ever allowed to touch that?".
+        let (base, hits) = spy();
+        let chain = build(
+            GuardMode::Audit,
+            None,
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+            Some((manifest_granting("/repo/src/lib.rs"), std::path::PathBuf::from("/repo"))),
+        );
+        let obs = chain
+            .tools
+            .execute(&ToolCall::new(
+                "read_file",
+                serde_json::json!({"path": "/repo/secrets.env"}),
+            ))
+            .await
+            .unwrap();
+        assert!(obs.is_error, "an undeclared read must be refused");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "it must not reach the tools");
+    }
+
+    #[tokio::test]
+    async fn a_declared_read_still_runs() {
+        // The other direction: scoping must not break the task it scopes.
+        let (base, hits) = spy();
+        let chain = build(
+            GuardMode::Audit,
+            None,
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+            Some((manifest_granting("/repo/src/lib.rs"), std::path::PathBuf::from("/repo"))),
+        );
+        let obs = chain
+            .tools
+            .execute(&ToolCall::new(
+                "read_file",
+                serde_json::json!({"path": "/repo/src/lib.rs"}),
+            ))
+            .await
+            .unwrap();
+        assert!(!obs.is_error, "a declared read must run: {}", obs.content);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_operator_blocklist_still_wins_over_a_permissive_manifest() {
+        // PolicyGuard is outermost so a manifest can never widen an operator ban.
+        let (base, hits) = spy();
+        let policy = Arc::new(
+            Policy::from_toml_str("blocked_tools = [\"read_file\"]").unwrap(),
+        );
+        let chain = build(
+            GuardMode::Audit,
+            Some(policy),
+            None,
+            None,
+            base,
+            None,
+            TaskId::new(),
+            Some((manifest_granting("/repo/**"), std::path::PathBuf::from("/repo"))),
+        );
+        let obs = chain
+            .tools
+            .execute(&ToolCall::new(
+                "read_file",
+                serde_json::json!({"path": "/repo/src/lib.rs"}),
+            ))
+            .await
+            .unwrap();
+        assert!(obs.is_error);
+        assert!(
+            obs.content.contains("blocked by policy"),
+            "the operator ban should be the reason, not the manifest: {}",
+            obs.content
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn without_a_manifest_the_run_is_unscoped_which_is_the_weaker_default() {
+        // Documents the gap rather than hiding it: passing None means only the
+        // mode guard applies, and an out-of-scope read runs.
+        let (base, hits) = spy();
+        let chain = build(GuardMode::Audit, None, None, None, base, None, TaskId::new(), None);
+        let obs = chain
+            .tools
+            .execute(&ToolCall::new(
+                "read_file",
+                serde_json::json!({"path": "/anywhere/at/all"}),
+            ))
+            .await
+            .unwrap();
+        assert!(!obs.is_error);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

@@ -567,7 +567,7 @@ fn build_guarded_tools(
     Arc<dyn ToolExecutor>,
     Option<Arc<kedge_audit::AuditExecutor>>,
 ) {
-    let chain = crate::guard::build(mode.as_guard_mode(), None, None, None, base, ledger, run_id);
+    let chain = crate::guard::build(mode.as_guard_mode(), None, None, None, base, ledger, run_id, None);
     (chain.tools, chain.auditor)
 }
 
@@ -645,6 +645,10 @@ async fn tool_run(args: &Value) -> Result<String> {
         base,
         Some(Arc::new(ledger.clone())),
         task.id,
+        // The MCP server runs arbitrary caller-supplied goals, so there is no
+        // single task manifest to scope it with. The mode guard is the boundary
+        // here.
+        None,
     );
     let (tools, auditor) = (chain.tools, chain.auditor);
 
