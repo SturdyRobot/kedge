@@ -347,7 +347,7 @@ model used by HashiCorp, MariaDB, CockroachDB, and Sentry.
   purpose: personal projects, research, evaluation, and internal non-revenue use.
 - **Commercial / enterprise use requires a paid license.** If Kedge (or a
   derivative or hosted version) is used in or as part of a for-profit product,
-  service, or internal system, contact **noeljacksonjs@gmail.com** for a
+  service, or internal system, contact **noel@nlj.dev** for a
   commercial license.
 - On the **Change Date (2030-07-23)** each version converts to the **Apache
   License 2.0** and becomes fully open source.

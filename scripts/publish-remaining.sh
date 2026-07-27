@@ -25,7 +25,7 @@ ORDER=(
 log() { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
 
 is_live() { # already on crates.io?
-  curl -s --max-time 10 -H "User-Agent: kedge-publish (noeljacksonjs@gmail.com)" \
+  curl -s --max-time 10 -H "User-Agent: kedge-publish (noel@nlj.dev)" \
     "https://crates.io/api/v1/crates/$1" 2>/dev/null | grep -q '"crate"'
 }
 
