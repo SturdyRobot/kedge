@@ -151,6 +151,39 @@ jobs:
           } > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
+      # Re-tagging has to actually re-release, and by default it does not.
+      #
+      # action-gh-release, when a release already exists for the tag, reuses the
+      # existing record and only swaps the assets. Its own log says so:
+      #
+      #   ↪️ Using release 360201650 for tag v0.4.0 instead of duplicate draft
+      #   🧹 Removing duplicate draft release 360243705 for tag v0.4.0...
+      #
+      # It built a new draft carrying the correct notes, then threw that one
+      # away and kept the old record's body. So v0.4.0 was rebuilt twice with
+      # fresh binaries and stale release notes, and the job passed both times.
+      #
+      # Clearing the draft first makes a re-tag idempotent. The `draft==true`
+      # filter is the whole safety of this step: a published release is a thing
+      # people have downloaded and linked, and must never be deleted by CI.
+      - name: Clear any stale DRAFT release for this tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ids=$(gh api "repos/${{ github.repository }}/releases" --paginate \
+                  --jq ".[] | select(.tag_name == \"$TAG\" and .draft == true) | .id")
+          if [ -z "$ids" ]; then
+            echo "no existing draft for $TAG; nothing to clear"
+            exit 0
+          fi
+          for id in $ids; do
+            echo "deleting stale draft release $id for $TAG"
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
