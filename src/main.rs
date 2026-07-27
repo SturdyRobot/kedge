@@ -43,6 +43,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// `Run` carries far more flags than any other subcommand, so the enum is
+// lopsided. Boxing it would satisfy the lint and fight clap's derive for a
+// value constructed exactly once per process. Not worth it.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run an agent task under hard budgets, journaling every step.
     Run(RunArgs),
