@@ -1,0 +1,31 @@
+[package]
+name = "kedge-skill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deny-by-default capability manifests for agent skills: declare what a skill may touch, prove it stayed inside."
+keywords = ["agent", "capability", "security", "least-privilege", "ai"]
+categories = ["development-tools"]
+# Not published. These are security boundaries, and two rounds of adversarial
+# testing found eleven bypasses in code already described as fail-safe — the
+# second round finding four the first round's fixes created. A crates.io
+# release is permanent and is an implicit promise the boundary holds.
+# Blocker: Spike 003 (docs/SLICES.md) — behaviour against real MCP server
+# vocabularies is unmeasured, and the false-refusal rate could be high.
+publish = false
+readme = "README.md"
+
+[dependencies]
+kedge-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+regex = "1"
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

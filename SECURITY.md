@@ -6,7 +6,7 @@ how to report a problem and what the tool actually guarantees.
 
 ## Reporting a vulnerability
 
-Email **noeljacksonjs@gmail.com** with `[kedge security]` in the subject, or open
+Email **noel@nlj.dev** with `[kedge security]` in the subject, or open
 a [private security advisory](https://github.com/nlj3/kedge/security/advisories/new).
 
 Please **do not open a public issue** for anything exploitable.

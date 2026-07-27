@@ -9,7 +9,7 @@ description = "A high-throughput, deterministic AI agent execution harness and v
 repository = "https://github.com/nlj3/kedge"
 homepage = "https://github.com/nlj3/kedge"
 readme = "README.md"
-authors = ["Noel Jackson <noeljacksonjs@gmail.com>"]
+authors = ["Noel Jackson <noel@nlj.dev>"]
 keywords = ["agent", "llm", "harness", "mcp", "ai"]
 categories = ["command-line-utilities", "development-tools"]
 default-run = "kedge"
@@ -24,14 +24,22 @@ members = ["crates/*"]
 # needs a nightly toolchain + bpf-linker. Excluded so the normal workspace build
 # (and CI) stays kernel-free and cross-platform. Build it separately — see
 # crates/kedge-probe/BUILD_EBPF.md.
-exclude = ["crates/kedge-probe-ebpf", "crates/kedge-bridge", "crates/kedge-web"]
+exclude = [
+    "crates/kedge-probe-ebpf",
+    "crates/kedge-bridge",
+    "crates/kedge-web",
+    # Bench fixtures are broken on purpose and compiled in isolation. Each is
+    # its own workspace root; excluding them here too keeps `cargo test
+    # --workspace` from ever adopting a deliberately-failing crate.
+    "crates/kedge-bench/fixtures",
+]
 resolver = "2"
 
 [workspace.package]
 version = "0.3.1"
 edition = "2021"
 license = "BUSL-1.1"
-authors = ["Noel Jackson <noeljacksonjs@gmail.com>"]
+authors = ["Noel Jackson <noel@nlj.dev>"]
 repository = "https://github.com/nlj3/kedge"
 
 # One source of truth for dependency versions across every crate.
@@ -42,6 +50,8 @@ kedge-mcp = { path = "crates/kedge-mcp", version = "0.3.1" }
 kedge-exec = { path = "crates/kedge-exec", version = "0.3.1" }
 kedge-ledger = { path = "crates/kedge-ledger", version = "0.3.1" }
 kedge-llm = { path = "crates/kedge-llm", version = "0.3.1" }
+kedge-skill = { path = "crates/kedge-skill", version = "0.3.1" }
+kedge-forge = { path = "crates/kedge-forge", version = "0.3.1" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "sync", "fs", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -75,6 +85,7 @@ kedge-mcp = { workspace = true }
 kedge-exec = { workspace = true }
 kedge-ledger = { workspace = true }
 kedge-llm = { workspace = true }
+kedge-skill = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

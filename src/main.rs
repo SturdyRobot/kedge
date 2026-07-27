@@ -43,6 +43,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// `Run` carries far more flags than any other subcommand, so the enum is
+// lopsided. Boxing it would satisfy the lint and fight clap's derive for a
+// value constructed exactly once per process. Not worth it.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run an agent task under hard budgets, journaling every step.
     Run(RunArgs),
@@ -134,6 +138,12 @@ struct RunArgs {
     /// Working directory the tools operate in.
     #[arg(long, default_value = ".")]
     cwd: PathBuf,
+    /// Deny-by-default capability manifest scoping this task (kedge-skill).
+    /// Without it the run is scoped only by the mode guard, which is weaker:
+    /// the mode guard asks "is this mutating?", a manifest asks "was this
+    /// task ever allowed to touch that?".
+    #[arg(long)]
+    manifest: Option<PathBuf>,
     /// Max cumulative tokens. [config: max_tokens, default: 100000]
     #[arg(long)]
     max_tokens: Option<u64>,
@@ -621,6 +631,8 @@ async fn cmd_resume(a: ResumeArgs) -> Result<()> {
         base,
         Some(Arc::new(ledger.clone())),
         task_id,
+        // No per-task manifest on this path yet: see `--manifest` on `kedge run`.
+        None,
     );
     let engine = ReActEngine::new(
         Arc::new(DemoReasoner),
@@ -812,6 +824,31 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
     }
     let approver: Option<Arc<dyn kedge_hitl::Approver>> = (mode == GuardMode::Hitl)
         .then(|| Arc::new(kedge_hitl::CliApprover) as Arc<dyn kedge_hitl::Approver>);
+
+    // A bad manifest is a hard error, never a silent fall-through to an
+    // unscoped run: asking for a capability boundary and quietly not getting
+    // one is the worst possible outcome.
+    let manifest = match &a.manifest {
+        None => None,
+        Some(path) => {
+            let vars = std::collections::HashMap::from([(
+                "workspace".to_string(),
+                a.cwd.to_string_lossy().into_owned(),
+            )]);
+            let m = kedge_skill::Manifest::from_toml_file(path, &vars)
+                .with_context(|| format!("loading capability manifest {}", path.display()))?;
+            if !json {
+                println!(
+                    "   manifest: {} v{} ({} grant(s)) — deny-by-default",
+                    m.name,
+                    m.version,
+                    m.declared().len()
+                );
+            }
+            Some((Arc::new(m), a.cwd.clone()))
+        }
+    };
+
     let chain = guard::build(
         mode,
         policy,
@@ -820,9 +857,11 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         tools,
         Some(Arc::new(ledger.clone())),
         task.id,
+        manifest,
     );
     let auditor = chain.auditor.clone();
     let gate = chain.gate.clone();
+    let skill = chain.skill.clone();
     let tools = chain.tools;
 
     let engine = ReActEngine::new(reasoner, tools, budget.clone()).with_observer(ledger.observer());
@@ -885,6 +924,30 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         let denied = g.denied();
         if denied > 0 {
             println!("  {denied} mutating tool call(s) were refused");
+        }
+    }
+    // Manifest conformance. Both halves matter: a refusal means the task tried
+    // to leave its scope, and an unused grant means the manifest is wider than
+    // the task needs, which is authority an injected instruction gets to spend.
+    if let Some(s) = &skill {
+        let c = s.conformance();
+        if c.conforms() {
+            println!("  manifest: conformed — {} call(s) all within scope", c.calls());
+        } else {
+            println!(
+                "  manifest: {} call(s) REFUSED as out of scope",
+                c.violations().len()
+            );
+            for v in c.violations().iter().take(3) {
+                println!("      {v}");
+            }
+        }
+        let unused = c.unused(s.manifest());
+        if !unused.is_empty() {
+            println!(
+                "  manifest: {} declared grant(s) never used — tighten with `kedge-forge`",
+                unused.len()
+            );
         }
     }
     println!(

@@ -1014,6 +1014,7 @@ dependencies = [
  "kedge-mcp",
  "kedge-policy",
  "kedge-server",
+ "kedge-skill",
  "nix",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1043,6 +1044,22 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "kedge-bench"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "kedge-core",
+ "kedge-ledger",
+ "kedge-skill",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
  "uuid",
 ]
 
@@ -1113,6 +1130,24 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "kedge-forge"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "kedge-bench",
+ "kedge-core",
+ "kedge-ledger",
+ "kedge-skill",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1230,6 +1265,21 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "kedge-skill"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "kedge-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

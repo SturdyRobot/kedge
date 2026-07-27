@@ -94,9 +94,10 @@ Bundled utilities (handy, not the headline; dedicated tools go deeper in each la
 - **Regression gate** (`kedge eval`): diff a run against a baseline ledger
   (step/tool/token/drift metrics), emit JUnit + a CI exit code; local and
   deterministic, no LLM-judge spend.
-- **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge` →
-  `pip install kedge-rt`), and an **experimental, observe-only eBPF/LSM prototype**
-  (`kedge-probe`, Linux: it logs, it does *not* enforce; see the crate docs).
+- **OpenTelemetry** (`--features otel`), **Python bindings** (`kedge-bridge`,
+  built locally with `maturin develop`; **not published to PyPI**), and an
+  **experimental, observe-only eBPF/LSM prototype** (`kedge-probe`, Linux: it
+  logs, it does *not* enforce; see the crate docs).
 
 ## Install
 
@@ -347,7 +348,7 @@ model used by HashiCorp, MariaDB, CockroachDB, and Sentry.
   purpose: personal projects, research, evaluation, and internal non-revenue use.
 - **Commercial / enterprise use requires a paid license.** If Kedge (or a
   derivative or hosted version) is used in or as part of a for-profit product,
-  service, or internal system, contact **noeljacksonjs@gmail.com** for a
+  service, or internal system, contact **noel@nlj.dev** for a
   commercial license.
 - On the **Change Date (2030-07-23)** each version converts to the **Apache
   License 2.0** and becomes fully open source.
