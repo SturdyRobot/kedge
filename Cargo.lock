@@ -1001,6 +1001,7 @@ dependencies = [
  "kedge-core",
  "kedge-eval",
  "kedge-exec",
+ "kedge-forge",
  "kedge-hitl",
  "kedge-ledger",
  "kedge-llm",

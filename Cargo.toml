@@ -86,6 +86,7 @@ kedge-exec = { workspace = true }
 kedge-ledger = { workspace = true }
 kedge-llm = { workspace = true }
 kedge-skill = { workspace = true }
+kedge-forge = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

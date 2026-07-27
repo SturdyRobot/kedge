@@ -66,9 +66,35 @@ enum Command {
     Resume(ResumeArgs),
     /// Serve the HTTP control API (inspect runs, resolve HITL approvals remotely).
     Serve(ServeArgs),
+    /// Derive a least-privilege capability manifest from a run that already
+    /// happened, and report how much authority that removes.
+    Forge(ForgeArgs),
     /// Run as an MCP server over stdio, exposing Kedge tools (compact, audit, run)
     /// to any MCP client (e.g. Claude Code).
     Mcp,
+}
+
+/// `kedge forge observe <task-id>`
+///
+/// The CLI used to print "tighten with `kedge-forge`" after a run, pointing at
+/// a command that did not exist: the crate was library-only, so the advice was
+/// unfollowable. 2,096 lines and 51 tests, reachable from nothing.
+#[derive(Parser)]
+struct ForgeArgs {
+    /// The run to learn from. `kedge ledger list` shows them.
+    task_id: String,
+    #[arg(long, env = "KEDGE_LEDGER_PATH", default_value = "kedge.sqlite")]
+    db: PathBuf,
+    /// The workspace the run acted in. Reachable authority is counted against
+    /// this tree, so a manifest is only comparable to another measured on the
+    /// same root at the same commit.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Name recorded in the emitted manifest.
+    #[arg(long, default_value = "observed-skill")]
+    name: String,
+    #[arg(long, default_value = "0.1.0")]
+    manifest_version: String,
 }
 
 #[derive(Parser)]
@@ -537,12 +563,105 @@ async fn main() -> Result<()> {
         Command::Eval(a) => cmd_eval(a),
         Command::Resume(a) => cmd_resume(a).await,
         Command::Serve(a) => cmd_serve(a).await,
+        Command::Forge(a) => cmd_forge(a).await,
         Command::Mcp => mcp_server::serve_stdio().await,
     }
 }
 
 /// Serve the HTTP control API. Ledger inspection (`/runs`) works standalone; the
 /// approvals API resolves requests from agents sharing this process's registry.
+/// Derive a manifest from a run that already happened, and say what it costs
+/// the agent in authority.
+///
+/// The number that matters is the pair at the end: how much of this workspace a
+/// general agent could touch, against how much the observed skill needs.
+/// Reported as a reachable set (files actually permitted) rather than a count
+/// of rules, because `write = ["**"]` is one rule granting everything and any
+/// metric that rewards it is worse than no metric (ADR-0003).
+async fn cmd_forge(a: ForgeArgs) -> Result<()> {
+    let task_id = TaskId(uuid_from_str(&a.task_id)?);
+    let ledger =
+        Ledger::open(&a.db).with_context(|| format!("opening ledger {}", a.db.display()))?;
+    let trajectory = ledger
+        .replay(task_id)
+        .with_context(|| format!("no run {task_id} in {}", a.db.display()))?;
+
+    let root = a
+        .root
+        .canonicalize()
+        .with_context(|| format!("resolving --root {}", a.root.display()))?;
+    // `observe` alone leaves verification Skipped, and reporting that as
+    // "incomplete: do not promote" would condemn a manifest for a check that
+    // was never run. `observe_verified` replays the trajectory through a real
+    // SkillGuard built from the emitted manifest, so the verdict means
+    // something.
+    let observed =
+        kedge_forge::observe_verified(&trajectory, &root, &a.name, &a.manifest_version).await?;
+
+    println!("↺ observed run {task_id}");
+    println!("  {}", observed.summary());
+
+    // Surfaced, never swallowed: a call whose effect could not be named means
+    // the manifest below is incomplete, and shipping it would look like
+    // least-privilege while omitting a real effect.
+    if !observed.unobservable.is_empty() {
+        println!(
+            "\n⚠ {} call(s) had effects that could not be named, so this manifest is NOT complete:",
+            observed.unobservable.len()
+        );
+        for u in &observed.unobservable {
+            println!("    {u:?}");
+        }
+    }
+
+    let manifest_toml = observed.manifest(&a.name, &a.manifest_version);
+    println!("\n{manifest_toml}");
+
+    match observed.compiled(&a.name, &a.manifest_version) {
+        Ok(compiled) => {
+            let skill = kedge_forge::reach(&compiled, &root)?;
+            let general_toml = kedge_forge::general_agent_manifest(&root, &["*"]);
+            let general = kedge_skill::Manifest::from_toml_str(
+                &general_toml,
+                &std::collections::HashMap::new(),
+            )
+            .ok()
+            .map(|m| kedge_forge::reach(&m, &root))
+            .transpose()?;
+
+            println!("reachable authority under {}", root.display());
+            if let Some(g) = &general {
+                println!(
+                    "  a general agent : {:>6} writable · {:>6} readable",
+                    g.writable, g.readable
+                );
+            }
+            println!(
+                "  this skill      : {:>6} writable · {:>6} readable",
+                skill.writable, skill.readable
+            );
+            if skill.escapes_root {
+                println!("  ⚠ a grant reaches outside the root; this is not a reduction");
+            }
+            if observed.is_complete() {
+                println!(
+                    "\n✔ verified: every call was nameable, and replaying the run through this \n\
+                     manifest permits all of it with nothing left over"
+                );
+            } else if !observed.unobservable.is_empty() {
+                println!("\n✘ incomplete: an effect could not be named, so this manifest omits it");
+            } else {
+                println!(
+                    "\n✘ the manifest does not fit the run it came from ({:?})",
+                    observed.verification
+                );
+            }
+        }
+        Err(e) => println!("✘ the emitted manifest does not compile: {e}"),
+    }
+    Ok(())
+}
+
 async fn cmd_serve(a: ServeArgs) -> Result<()> {
     let ledger = Ledger::open(&a.db).context("opening ledger")?;
     let approvals = kedge_hitl::PendingApprovals::new();
@@ -948,8 +1067,12 @@ async fn cmd_run(a: RunArgs) -> Result<()> {
         let unused = c.unused(s.manifest());
         if !unused.is_empty() {
             println!(
-                "  manifest: {} declared grant(s) never used — tighten with `kedge-forge`",
-                unused.len()
+                // This used to name `kedge-forge`, a crate with no binary,
+                // so the advice could not be followed. It now names the
+                // command and the run, so it can be pasted.
+                "  manifest: {} declared grant(s) never used — tighten with `kedge forge {}`",
+                unused.len(),
+                task.id
             );
         }
     }
