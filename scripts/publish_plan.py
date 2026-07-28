@@ -29,10 +29,24 @@ def main() -> int:
     # cargo will not publish a crate whose dependencies are absent from the
     # registry, so a publishable crate depending on an unpublishable one can
     # never go out. Say so before anything is attempted.
-    for name in sorted(pubable):
-        blockers = sorted(
-            {d["name"] for d in pkgs[name]["dependencies"] if d["name"] in nopub}
+    #
+    # Dev-dependencies do not count. cargo strips a path-only dev-dependency
+    # when packaging, because it is not needed to build the library, so
+    # kedge-forge can dev-depend on the unpublishable kedge-bench and still go
+    # out. The first version of this check ignored `kind` and refused to publish
+    # the workspace over exactly that, which is the same false-blocker class it
+    # was written to catch.
+    def blocking_deps(name: str) -> list[str]:
+        return sorted(
+            {
+                d["name"]
+                for d in pkgs[name]["dependencies"]
+                if d["name"] in nopub and d.get("kind") in (None, "build")
+            }
         )
+
+    for name in sorted(pubable):
+        blockers = blocking_deps(name)
         if blockers:
             print(f"BLOCKED\t{name}\t{pkgs[name]['version']}\t{','.join(blockers)}")
 
@@ -44,7 +58,12 @@ def main() -> int:
             for n in pubable
             if n not in shipped
             and all(
-                d["name"] not in pubable or d["name"] in shipped
+                d["name"] not in pubable
+                or d["name"] in shipped
+                # A dev-dependency is stripped at publish time, so it does not
+                # have to be on the registry first. Including it here would
+                # deadlock any pair of crates that dev-depend on each other.
+                or d.get("kind") == "dev"
                 for d in pkgs[n]["dependencies"]
             )
         )

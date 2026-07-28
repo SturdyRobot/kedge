@@ -14,7 +14,6 @@ categories = ["development-tools"]
 # release is permanent and is an implicit promise the boundary holds.
 # Blocker: Spike 003 (docs/SLICES.md) — behaviour against real MCP server
 # vocabularies is unmeasured, and the false-refusal rate could be high.
-publish = false
 readme = "README.md"
 
 [dependencies]
