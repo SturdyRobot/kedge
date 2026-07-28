@@ -125,7 +125,7 @@ jobs:
       # Uploaded whether or not the diff passed, so a failure can be read
       # without re-running anything.
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: adversarial-report
           path: adversarial_report.txt
