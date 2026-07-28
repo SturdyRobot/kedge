@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -47,7 +47,7 @@ jobs:
     name: wasm · core stays portable
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (stable + wasm target)
         uses: dtolnay/rust-toolchain@stable
@@ -91,7 +91,7 @@ jobs:
     name: reproducibility · published command on a clean checkout
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The only documented prerequisite. If anything else turns out to be
       # required, this job is where that gets discovered.
@@ -139,7 +139,7 @@ jobs:
     name: supply chain · cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
