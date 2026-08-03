@@ -335,32 +335,14 @@ and re-run on a clean, uncached checkout by the `repro` CI job, so it cannot
 drift from the code without going red. Widening one glob in the task manifest
 takes it from `0/10` to `2/10`, which is how that gate was checked.
 
-## AI-Native development
+## How it was built
 
-This is a Rust codebase built with an **AI-native workflow**: I drive an AI coding
-agent as a pair programmer and own the architecture, the design decisions, and the
-final review. AI is a tool in the loop, not the author of record. The value is
-that one developer can direct it to ship and *maintain* a system this broad without
-the quality bar dropping. Concretely, where it was used:
-
-- **Design & scaffolding.** I set the crate boundaries and the core contracts (the
-  `Reasoner` trait, the budget model, the error taxonomy); the agent scaffolds
-  implementations against them, and I review, refactor, and reject.
-- **Adversarial self-audit.** After each subsystem landed, the agent was tasked to
-  *attack its own code*. That surfaced real defects a happy-path pass would miss:
-  an output-drain deadlock when a backgrounded child holds the pipe, a non-Unix
-  timeout that never actually killed the child, an MCP reader/dispatch race, and
-  a `verify` false-positive on non-cargo directories. Every one was fixed **with a
-  regression test** so it can't silently return.
-- **Test generation.** The suite (unit + end-to-end CLI tests via `assert_cmd`)
-  was written agent-first from stated invariants, then pruned by hand.
-- **CI as the backstop.** `cargo fmt`, `clippy -D warnings`, and the full test
-  suite run on Linux and macOS on every push; the machine-written code has to pass
-  the same gate as anything else.
-
-The determinism goals of the tool itself (hard budgets, replay of a recorded run
-against a baseline) are also what make an AI-native workflow trustworthy here:
-every run is journaled, so a change's effect is verifiable rather than vibes.
+I use AI coding tools as part of the loop, and I own the architecture, the
+design decisions and the final review. What makes that trustworthy here is the
+same thing the tool itself is for: every run is journaled, `cargo fmt`,
+`clippy -D warnings` and the full suite gate every push on Linux and macOS, and
+the published benchmark figures are pinned by a CI job that re-runs them on a
+clean checkout. A change's effect is verifiable rather than asserted.
 
 ## Status
 
